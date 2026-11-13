@@ -10,15 +10,8 @@ HOST_FILE = inputstr
 sprintf '%s\commands.txt' BASE_DIR
 CMD_FILE = inputstr
 
-; --- 1. config.ini から設定読み込み ---
-getinistr INI_FILE 'Bastion' 'UseBastion' USE_BASTION
-getinistr INI_FILE 'Bastion' 'Host'       BASTION_HOST
-getinistr INI_FILE 'Bastion' 'Port'       BASTION_PORT
-getinistr INI_FILE 'Bastion' 'User'       BASTION_USER
-getinistr INI_FILE 'Bastion' 'Pass'       BASTION_PASS
-getinistr INI_FILE 'Bastion' 'Prompt'     BASTION_PROMPT
-
-getinistr INI_FILE 'Log'     'SaveDir'    DEF_LOG_DIR
+; --- 1. config.ini から設定読み込み（getinistr 不使用の4.0x互換パース） ---
+call load_config_ini
 
 ; SaveDir が空欄ならマクロ配下の logs を初期値にする
 strlen DEF_LOG_DIR
@@ -143,6 +136,89 @@ enablekeyb 1
 sprintf 'すべての機器のログ取得が完了しました。\n保存先: %s' LOG_DIR
 messagebox inputstr '完了'
 end
+
+
+; ==============================================================================
+; サブルーチン：config.ini 読み込み（Tera Term 4.0.1 互換・getinistr代替）
+; ==============================================================================
+:load_config_ini
+    USE_BASTION    = '0'
+    BASTION_HOST   = ''
+    BASTION_PORT   = '22'
+    BASTION_USER   = ''
+    BASTION_PASS   = ''
+    BASTION_PROMPT = '$'
+    DEF_LOG_DIR    = ''
+
+    fileopen ini_fh INI_FILE 0 1
+    if ini_fh = -1 then
+        messagebox 'config.ini が見つかりません。' '設定エラー'
+        end
+    endif
+
+    while 1
+        filereadln ini_fh ini_line
+        if result = 1 then
+            break
+        endif
+
+        strlen ini_line
+        INI_LEN = result
+
+        if INI_LEN > 0 then
+            strcopy ini_line 1 1 FIRST_CHAR
+            strcompare FIRST_CHAR ';'
+            IS_CMT = result
+            strcompare FIRST_CHAR '['
+            IS_SEC = result
+
+            if IS_CMT <> 0 and IS_SEC <> 0 then
+                strscan ini_line '='
+                EQ_POS = result
+                if EQ_POS > 1 then
+                    strcopy ini_line 1 EQ_POS - 1 INI_KEY
+                    VAL_LEN = INI_LEN - EQ_POS
+                    if VAL_LEN > 0 then
+                        strcopy ini_line EQ_POS + 1 VAL_LEN INI_VAL
+                    else
+                        INI_VAL = ''
+                    endif
+
+                    strcompare INI_KEY 'UseBastion'
+                    if result = 0 then
+                        USE_BASTION = INI_VAL
+                    endif
+                    strcompare INI_KEY 'Host'
+                    if result = 0 then
+                        BASTION_HOST = INI_VAL
+                    endif
+                    strcompare INI_KEY 'Port'
+                    if result = 0 then
+                        BASTION_PORT = INI_VAL
+                    endif
+                    strcompare INI_KEY 'User'
+                    if result = 0 then
+                        BASTION_USER = INI_VAL
+                    endif
+                    strcompare INI_KEY 'Pass'
+                    if result = 0 then
+                        BASTION_PASS = INI_VAL
+                    endif
+                    strcompare INI_KEY 'Prompt'
+                    if result = 0 then
+                        BASTION_PROMPT = INI_VAL
+                    endif
+                    strcompare INI_KEY 'SaveDir'
+                    if result = 0 then
+                        DEF_LOG_DIR = INI_VAL
+                    endif
+                endif
+            endif
+        endif
+    endwhile
+
+    fileclose ini_fh
+return
 
 
 ; ==============================================================================
