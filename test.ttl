@@ -1,33 +1,106 @@
 ; ==============================================================================
-; 全機種・全昇格パターン網羅 ＆ 確実ログアウト対応 クリーンログ収集マクロ
+; Tera Term 4.0x系互換：起動時保存先ポップアップ選択 ＆ 踏み台多段SSH収集マクロ
 ; ==============================================================================
 
 getdir BASE_DIR
-sprintf2 HOST_FILE '%s\hosts.csv' BASE_DIR
-sprintf2 CMD_FILE  '%s\commands.txt' BASE_DIR
+sprintf '%s\config.ini' BASE_DIR
+INI_FILE = inputstr
+sprintf '%s\hosts.csv' BASE_DIR
+HOST_FILE = inputstr
+sprintf '%s\commands.txt' BASE_DIR
+CMD_FILE = inputstr
 
-; 実行日時ごとのログ保存フォルダを作成
+; --- 1. config.ini から設定読み込み ---
+getinistr INI_FILE 'Bastion' 'UseBastion' USE_BASTION
+getinistr INI_FILE 'Bastion' 'Host'       BASTION_HOST
+getinistr INI_FILE 'Bastion' 'Port'       BASTION_PORT
+getinistr INI_FILE 'Bastion' 'User'       BASTION_USER
+getinistr INI_FILE 'Bastion' 'Pass'       BASTION_PASS
+getinistr INI_FILE 'Bastion' 'Prompt'     BASTION_PROMPT
+
+getinistr INI_FILE 'Log'     'SaveDir'    DEF_LOG_DIR
+
+; SaveDir が空欄ならマクロ配下の logs を初期値にする
+strlen DEF_LOG_DIR
+if result = 0 then
+    sprintf '%s\logs' BASE_DIR
+    DEF_LOG_DIR = inputstr
+endif
+
+; --- 2. 毎回起動時に保存先ディレクトリをポップアップで選択・入力 ---
+inputbox 'ログを保存するディレクトリのフルパスを入力してください（存在しない場合は自動作成されます）:' 'ログ保存先ディレクトリの選択' DEF_LOG_DIR
+LOG_DIR = inputstr
+
+; キャンセルまたは空欄でOKされた場合は安全に終了
+strlen LOG_DIR
+if result = 0 then
+    messagebox '保存先が指定されなかったため処理を中断します。' '中断'
+    end
+endif
+
+; 末尾に '\' が付いていたら除去する（パス結合の二重スラッシュ防止）
+strlen LOG_DIR
+DIR_LEN = result
+strcopy LOG_DIR DIR_LEN 1 LAST_CHAR
+strcompare LAST_CHAR '\'
+if result = 0 then
+    strcopy LOG_DIR 1 DIR_LEN - 1 LOG_DIR
+endif
+
+; 指定されたフォルダが存在しない場合に備えて Windows の mkdir で自動作成（4.0x互換）
+sprintf 'cmd.exe /c if not exist "%s" mkdir "%s"' LOG_DIR LOG_DIR
+exec inputstr
+mpause 500
+
+; 実行IDとサマリCSVの初期化（書き込みテストも兼ねる）
 getdate RUN_ID '%Y%m%d_%H%M%S'
-sprintf2 LOG_DIR '%s\logs\%s' BASE_DIR RUN_ID
-foldercreate LOG_DIR
+sprintf '%s\summary_%s.csv' LOG_DIR RUN_ID
+SUMMARY_FILE = inputstr
 
-; 実行結果サマリCSVの初期化
-sprintf2 SUMMARY_FILE '%s\summary.csv' LOG_DIR
 fileopen sum_fh SUMMARY_FILE 0
+if sum_fh = -1 then
+    sprintf '指定された保存先ディレクトリを作成できないか、書き込み権限がありません:\n%s' LOG_DIR
+    messagebox inputstr 'フォルダエラー'
+    end
+endif
 filewriteln sum_fh 'Timestamp,Hostname,IP,FinalPrompt,Status,Detail'
 fileclose sum_fh
 
+; hosts.csv オープン
 fileopen host_fh HOST_FILE 0 1
 if host_fh = -1 then
     messagebox 'hosts.csv が見つかりません。' 'エラー'
     end
 endif
 
-; マクロ実行中の誤操作（キー入力）をブロック
 enablekeyb 0
 
+; --- 3. 踏み台モードの場合、最初に踏み台サーバーへ1回だけログイン ---
+strcompare USE_BASTION '1'
+if result = 0 then
+    sprintf '%s:%s /ssh2 /nosecuritywarning /auth=password /user=%s /passwd=%s' BASTION_HOST BASTION_PORT BASTION_USER BASTION_PASS
+    CONN_STR = inputstr
+    connect CONN_STR
+    if result <> 2 then
+        fileclose host_fh
+        enablekeyb 1
+        messagebox '踏み台サーバーへの接続に失敗しました。' '踏み台エラー'
+        end
+    endif
+
+    timeout = 15
+    wait BASTION_PROMPT '$' '#' '>'
+    if result = 0 then
+        disconnect 0
+        fileclose host_fh
+        enablekeyb 1
+        messagebox '踏み台サーバーのプロンプト待機でタイムアウトしました。' '踏み台エラー'
+        end
+    endif
+endif
+
 ; ------------------------------------------------------------------------------
-; メインループ：hosts.csv を1行ずつ読み込み
+; 4. メインループ：hosts.csv を1行ずつ処理
 ; ------------------------------------------------------------------------------
 while 1
     filereadln host_fh line
@@ -35,39 +108,100 @@ while 1
         break
     endif
 
-    ; 空行および '#' 始まりのコメント行をスキップ
     strlen line
-    if result = 0 then
-        continue
-    endif
-    strmatch line '^#'
-    if result > 0 then
-        continue
-    endif
+    LINE_LEN = result
+    strscan line '#'
+    COMMENT_POS = result
 
-    ; カンマ区切りで5列に分割
-    strsplit line ',' 5
-    if result < 5 then
-        continue
+    if LINE_LEN > 0 and COMMENT_POS <> 1 then
+        CSV_SRC = line
+        call parse_csv_5
+
+        if CSV_OK = 1 then
+            IP_ADDR  = CSV_COL1
+            HOSTNAME = CSV_COL2
+            USER     = CSV_COL3
+            PASS     = CSV_COL4
+            EN_PASS  = CSV_COL5
+
+            call process_node
+        endif
     endif
-
-    IP_ADDR   = groupmatchstr1
-    HOSTNAME  = groupmatchstr2
-    USER      = groupmatchstr3
-    PASS      = groupmatchstr4
-    EN_PASS   = groupmatchstr5
-
-    call process_node
 endwhile
 
 fileclose host_fh
+
+; 踏み台接続中なら最後に踏み台からもログアウトして切断
+strcompare USE_BASTION '1'
+if result = 0 then
+    sendln 'exit'
+    mpause 500
+    disconnect 0
+endif
+
 enablekeyb 1
-messagebox 'すべての機器のログ取得が完了しました。' '完了'
+sprintf 'すべての機器のログ取得が完了しました。\n保存先: %s' LOG_DIR
+messagebox inputstr '完了'
 end
 
 
 ; ==============================================================================
-; サブルーチン：1台ごとの接続〜ログ取得〜切断
+; サブルーチン：カンマ区切りCSVを5つに分割
+; ==============================================================================
+:parse_csv_5
+    CSV_OK = 0
+    CSV_COL1 = ''
+    CSV_COL2 = ''
+    CSV_COL3 = ''
+    CSV_COL4 = ''
+    CSV_COL5 = ''
+    WORK_STR = CSV_SRC
+
+    strscan WORK_STR ','
+    if result = 0 then
+        return
+    endif
+    POS = result
+    strcopy WORK_STR 1 POS - 1 CSV_COL1
+    strlen WORK_STR
+    strcopy WORK_STR POS + 1 result - POS WORK_STR
+
+    strscan WORK_STR ','
+    if result = 0 then
+        return
+    endif
+    POS = result
+    strcopy WORK_STR 1 POS - 1 CSV_COL2
+    strlen WORK_STR
+    strcopy WORK_STR POS + 1 result - POS WORK_STR
+
+    strscan WORK_STR ','
+    if result = 0 then
+        return
+    endif
+    POS = result
+    strcopy WORK_STR 1 POS - 1 CSV_COL3
+    strlen WORK_STR
+    strcopy WORK_STR POS + 1 result - POS WORK_STR
+
+    strscan WORK_STR ','
+    if result = 0 then
+        return
+    endif
+    POS = result
+    strcopy WORK_STR 1 POS - 1 CSV_COL4
+    strlen WORK_STR
+    REM_LEN = result - POS
+    if REM_LEN > 0 then
+        strcopy WORK_STR POS + 1 REM_LEN CSV_COL5
+    endif
+
+    CSV_OK = 1
+return
+
+
+; ==============================================================================
+; サブルーチン：1台ごとの接続（踏み台経由 / 直結両対応）〜ログ取得〜離脱
 ; ==============================================================================
 :process_node
     STATUS = 'NG'
@@ -75,13 +209,49 @@ end
     FINAL_SYM = 'Unknown'
     IS_LOG_OPEN = 0
 
-    ; --- 1. SSH接続（ホスト鍵確認スキップ・ここではまだログを開かない） ---
-    sprintf2 CONN_STR '%s:22 /ssh2 /nosecuritywarning /auth=password /user=%s /passwd=%s' IP_ADDR USER PASS
-    connect CONN_STR
-    if result <> 2 then
-        DETAIL = 'SSH Connect Failed'
-        call write_summary
-        return
+    strcompare USE_BASTION '1'
+    if result = 0 then
+        ; --- 【A】踏み台経由での多段SSHログイン ---
+        testlink
+        if result = 0 then
+            DETAIL = 'Bastion Session Lost'
+            call write_summary
+            return
+        endif
+
+        sprintf 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null %s@%s' USER IP_ADDR
+        sendln inputstr
+
+        timeout = 15
+        wait 'assword:' 'yes/no' 'refused' 'timed out' 'No route' 'Permission denied' '>' '#' '$' ']'
+        if result = 1 then
+            sendln PASS
+        elseif result = 2 then
+            sendln 'yes'
+            wait 'assword:'
+            sendln PASS
+        elseif result >= 3 and result <= 6 then
+            DETAIL = 'Hop SSH Connect Failed'
+            wait BASTION_PROMPT '$' '#'
+            call write_summary
+            return
+        elseif result = 0 then
+            DETAIL = 'Hop SSH Timeout'
+            send #3
+            wait BASTION_PROMPT '$' '#'
+            call write_summary
+            return
+        endif
+    else
+        ; --- 【B】直結モードでのSSHログイン ---
+        sprintf '%s:22 /ssh2 /nosecuritywarning /auth=password /user=%s /passwd=%s' IP_ADDR USER PASS
+        CONN_STR = inputstr
+        connect CONN_STR
+        if result <> 2 then
+            DETAIL = 'Direct SSH Connect Failed'
+            call write_summary
+            return
+        endif
     endif
 
     ; --- 2. 全パターン網羅の特権昇格＆ページ送り無効化 ---
@@ -92,8 +262,9 @@ end
         return
     endif
 
-    ; --- 3. ★ここからクリーンログ取得開始（前処理のゴミを入れない） ---
-    sprintf2 DEV_LOG '%s\%s.log' LOG_DIR HOSTNAME
+    ; --- 3. クリーンログ取得開始 ---
+    sprintf '%s\%s_%s.log' LOG_DIR RUN_ID HOSTNAME
+    DEV_LOG = inputstr
     logopen DEV_LOG 0 0
     IS_LOG_OPEN = 1
 
@@ -114,37 +285,33 @@ end
         endif
 
         strlen cmd_line
-        if result = 0 then
-            continue
-        endif
-        strmatch cmd_line '^;'
-        if result > 0 then
-            continue
-        endif
+        CMD_LEN = result
+        strscan cmd_line ';'
+        CMD_CMT = result
 
-        ; ログにコマンド見出しを書き込み
-        sprintf2 HDR #13#10'==================== [ %s ] ====================' #13#10 cmd_line
-        logwrite HDR
+        if CMD_LEN > 0 and CMD_CMT <> 1 then
+            sprintf #13#10'==================== [ %s ] ====================' #13#10 cmd_line
+            logwrite inputstr
 
-        sendln cmd_line
+            sendln cmd_line
 
-        ; ページ送り無効化が効かなかった機器でも --More-- を自動突破するループ
-        while 1
-            timeout = 30
-            wait FINAL_SYM '--More--' '-- More --' '---(more)---' 'Press any key'
-            if result = 1 then
-                break
-            elseif result >= 2 and result <= 5 then
-                send ' '
-            else
-                DETAIL = 'Command Output Timeout'
-                CMD_OK = 0
+            while 1
+                timeout = 30
+                wait FINAL_SYM '--More--' '-- More --' '---(more)---' 'Press any key'
+                if result = 1 then
+                    break
+                elseif result >= 2 and result <= 5 then
+                    send ' '
+                else
+                    DETAIL = 'Command Output Timeout'
+                    CMD_OK = 0
+                    break
+                endif
+            endwhile
+
+            if CMD_OK = 0 then
                 break
             endif
-        endwhile
-
-        if CMD_OK = 0 then
-            break
         endif
     endwhile
     fileclose cmd_fh
@@ -167,10 +334,10 @@ return
 :ensure_privileged_mode
     PREP_OK = 0
 
-    ; 【関門1】初期画面突破（Press any key / 再ログイン / y/n確認）
+    ; 【関門1】初期画面突破
     timeout = 15
     while 1
-        wait '>' '#' '$' '%' ']' 'User:' 'login:' 'Password:' 'Press any key' '(y/n)'
+        wait '>' '#' '$' '%' ']' 'User:' 'login:' 'assword:' 'Press any key' '(y/n)'
         if result >= 1 and result <= 5 then
             INIT_SYM_IDX = result
             break
@@ -192,9 +359,9 @@ return
     if INIT_SYM_IDX <> 2 then
         sendln 'enable'
         timeout = 5
-        wait 'Password:' 'password:' '#' 'Invalid' 'Unknown' 'not found' 'Error' 'syntax' '>' '$'
+        wait 'assword:' '#' 'Invalid' 'Unknown' 'not found' 'Error' 'syntax' '>' '$'
         
-        if result = 1 or result = 2 then
+        if result = 1 then
             strlen EN_PASS
             if result > 0 then
                 sendln EN_PASS
@@ -203,22 +370,22 @@ return
             endif
             
             timeout = 5
-            wait '#' ']' 'Password:' 'password:' 'denied' 'Invalid' 'failed' '>'
+            wait '#' ']' 'assword:' 'denied' 'Invalid' 'failed' '>'
             if result <> 1 and result <> 2 then
                 DETAIL = 'Enable Authentication Failed'
                 return
             endif
 
-        elseif result = 3 then
+        elseif result = 2 then
             ; パスワードなしで '#' 昇格完了
-        elseif result >= 4 and result <= 8 then
+        elseif result >= 3 and result <= 7 then
             wait '>' '$' '%' ']' '#'
             strlen EN_PASS
             if result > 0 then
                 sendln 'administrator'
                 timeout = 3
-                wait 'Password:' 'password:' '#' 'Error' 'Invalid' '>'
-                if result = 1 or result = 2 then
+                wait 'assword:' '#' 'Error' 'Invalid' '>'
+                if result = 1 then
                     sendln EN_PASS
                     wait '#' '>'
                 endif
@@ -229,7 +396,7 @@ return
         endif
     endif
 
-    ; 【関門3】ページ送り（--More--）無効化の総当たり
+    ; 【関門3】ページ送り無効化の総当たり
     timeout = 2
 
     sendln 'terminal length 0'
@@ -273,16 +440,21 @@ return
 
 
 ; ==============================================================================
-; サブルーチン：あらゆる機器から確実に抜ける（多段階ログアウト＋最終強制切断）
+; サブルーチン：確実ログアウト（踏み台モード時は踏み台セッションを殺さない）
 ; ==============================================================================
 :safe_logout
     send #3
     mpause 200
 
+    strcompare USE_BASTION '1'
+    IS_BASTION = result
+
     for i 1 3
-        testlink
-        if result = 0 then
-            break
+        if IS_BASTION <> 0 then
+            testlink
+            if result = 0 then
+                break
+            endif
         endif
 
         if i = 1 then
@@ -294,23 +466,42 @@ return
         endif
 
         timeout = 2
-        wait 'Save' 'save' '(y/n)' '[y/n]' 'Are you sure' '>' '#' '$' ']'
-
-        if result = 1 or result = 2 then
-            sendln 'n'
-            mpause 300
-        elseif result >= 3 and result <= 5 then
-            sendln 'y'
-            mpause 300
-        elseif result >= 6 and result <= 9 then
-            continue
+        if IS_BASTION = 0 then
+            wait BASTION_PROMPT 'Save' 'save' '(y/n)' '[y/n]' 'Are you sure' '>' '#' '$' ']'
+            if result = 1 then
+                break
+            elseif result = 2 or result = 3 then
+                sendln 'n'
+                mpause 300
+            elseif result >= 4 and result <= 6 then
+                sendln 'y'
+                mpause 300
+            endif
+        else
+            wait 'Save' 'save' '(y/n)' '[y/n]' 'Are you sure' '>' '#' '$' ']'
+            if result = 1 or result = 2 then
+                sendln 'n'
+                mpause 300
+            elseif result >= 3 and result <= 5 then
+                sendln 'y'
+                mpause 300
+            endif
         endif
     next
 
-    testlink
-    if result <> 0 then
-        disconnect 0
-        mpause 300
+    if IS_BASTION = 0 then
+        sendln ''
+        mpause 200
+        send '~.'
+        mpause 500
+        sendln ''
+        wait BASTION_PROMPT '$' '#'
+    else
+        testlink
+        if result <> 0 then
+            disconnect 0
+            mpause 300
+        endif
     endif
 return
 
@@ -328,7 +519,7 @@ return
 :write_summary
     getdate TS '%Y/%m/%d %H:%M:%S'
     fileopen sum_fh SUMMARY_FILE 1
-    sprintf2 SUM_LINE '%s,%s,%s,%s,%s,%s' TS HOSTNAME IP_ADDR FINAL_SYM STATUS DETAIL
-    filewriteln sum_fh SUM_LINE
+    sprintf '%s,%s,%s,%s,%s,%s' TS HOSTNAME IP_ADDR FINAL_SYM STATUS DETAIL
+    filewriteln sum_fh inputstr
     fileclose sum_fh
 return
