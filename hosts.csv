@@ -1,0 +1,4 @@
+IP,Hostname,User,LoginPass,EnablePass
+192.168.1.1,Core-SW01,admin,pass123,enpass123
+192.168.1.2,Edge-RT01,admin,pass123,
+192.168.1.10,WLC-01,admin,pass123,enpass123

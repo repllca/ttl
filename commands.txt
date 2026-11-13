@@ -1,0 +1,5 @@
+; 取得したいコマンドを1行ずつ記載
+show version
+show running-config
+show ip interface brief
+show inventory

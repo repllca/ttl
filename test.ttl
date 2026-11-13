@@ -1,0 +1,334 @@
+; ==============================================================================
+; 全機種・全昇格パターン網羅 ＆ 確実ログアウト対応 クリーンログ収集マクロ
+; ==============================================================================
+
+getdir BASE_DIR
+sprintf2 HOST_FILE '%s\hosts.csv' BASE_DIR
+sprintf2 CMD_FILE  '%s\commands.txt' BASE_DIR
+
+; 実行日時ごとのログ保存フォルダを作成
+getdate RUN_ID '%Y%m%d_%H%M%S'
+sprintf2 LOG_DIR '%s\logs\%s' BASE_DIR RUN_ID
+foldercreate LOG_DIR
+
+; 実行結果サマリCSVの初期化
+sprintf2 SUMMARY_FILE '%s\summary.csv' LOG_DIR
+fileopen sum_fh SUMMARY_FILE 0
+filewriteln sum_fh 'Timestamp,Hostname,IP,FinalPrompt,Status,Detail'
+fileclose sum_fh
+
+fileopen host_fh HOST_FILE 0 1
+if host_fh = -1 then
+    messagebox 'hosts.csv が見つかりません。' 'エラー'
+    end
+endif
+
+; マクロ実行中の誤操作（キー入力）をブロック
+enablekeyb 0
+
+; ------------------------------------------------------------------------------
+; メインループ：hosts.csv を1行ずつ読み込み
+; ------------------------------------------------------------------------------
+while 1
+    filereadln host_fh line
+    if result = 1 then
+        break
+    endif
+
+    ; 空行および '#' 始まりのコメント行をスキップ
+    strlen line
+    if result = 0 then
+        continue
+    endif
+    strmatch line '^#'
+    if result > 0 then
+        continue
+    endif
+
+    ; カンマ区切りで5列に分割
+    strsplit line ',' 5
+    if result < 5 then
+        continue
+    endif
+
+    IP_ADDR   = groupmatchstr1
+    HOSTNAME  = groupmatchstr2
+    USER      = groupmatchstr3
+    PASS      = groupmatchstr4
+    EN_PASS   = groupmatchstr5
+
+    call process_node
+endwhile
+
+fileclose host_fh
+enablekeyb 1
+messagebox 'すべての機器のログ取得が完了しました。' '完了'
+end
+
+
+; ==============================================================================
+; サブルーチン：1台ごとの接続〜ログ取得〜切断
+; ==============================================================================
+:process_node
+    STATUS = 'NG'
+    DETAIL = ''
+    FINAL_SYM = 'Unknown'
+    IS_LOG_OPEN = 0
+
+    ; --- 1. SSH接続（ホスト鍵確認スキップ・ここではまだログを開かない） ---
+    sprintf2 CONN_STR '%s:22 /ssh2 /nosecuritywarning /auth=password /user=%s /passwd=%s' IP_ADDR USER PASS
+    connect CONN_STR
+    if result <> 2 then
+        DETAIL = 'SSH Connect Failed'
+        call write_summary
+        return
+    endif
+
+    ; --- 2. 全パターン網羅の特権昇格＆ページ送り無効化 ---
+    call ensure_privileged_mode
+    if PREP_OK = 0 then
+        call safe_logout
+        call write_summary
+        return
+    endif
+
+    ; --- 3. ★ここからクリーンログ取得開始（前処理のゴミを入れない） ---
+    sprintf2 DEV_LOG '%s\%s.log' LOG_DIR HOSTNAME
+    logopen DEV_LOG 0 0
+    IS_LOG_OPEN = 1
+
+    ; --- 4. commands.txt を1行ずつ実行 ---
+    fileopen cmd_fh CMD_FILE 0 1
+    if cmd_fh = -1 then
+        DETAIL = 'commands.txt Not Found'
+        call safe_logout
+        call cleanup_and_summary
+        return
+    endif
+
+    CMD_OK = 1
+    while 1
+        filereadln cmd_fh cmd_line
+        if result = 1 then
+            break
+        endif
+
+        strlen cmd_line
+        if result = 0 then
+            continue
+        endif
+        strmatch cmd_line '^;'
+        if result > 0 then
+            continue
+        endif
+
+        ; ログにコマンド見出しを書き込み
+        sprintf2 HDR #13#10'==================== [ %s ] ====================' #13#10 cmd_line
+        logwrite HDR
+
+        sendln cmd_line
+
+        ; ページ送り無効化が効かなかった機器でも --More-- を自動突破するループ
+        while 1
+            timeout = 30
+            wait FINAL_SYM '--More--' '-- More --' '---(more)---' 'Press any key'
+            if result = 1 then
+                break
+            elseif result >= 2 and result <= 5 then
+                send ' '
+            else
+                DETAIL = 'Command Output Timeout'
+                CMD_OK = 0
+                break
+            endif
+        endwhile
+
+        if CMD_OK = 0 then
+            break
+        endif
+    endwhile
+    fileclose cmd_fh
+
+    ; --- 5. 多段階ログアウト・切断 ---
+    call safe_logout
+
+    if CMD_OK = 1 then
+        STATUS = 'OK'
+        DETAIL = 'Success'
+    endif
+
+    call cleanup_and_summary
+return
+
+
+; ==============================================================================
+; サブルーチン：全パターンを突破して特権モード＆ページャー無効化する
+; ==============================================================================
+:ensure_privileged_mode
+    PREP_OK = 0
+
+    ; 【関門1】初期画面突破（Press any key / 再ログイン / y/n確認）
+    timeout = 15
+    while 1
+        wait '>' '#' '$' '%' ']' 'User:' 'login:' 'Password:' 'Press any key' '(y/n)'
+        if result >= 1 and result <= 5 then
+            INIT_SYM_IDX = result
+            break
+        elseif result = 6 or result = 7 then
+            sendln USER
+        elseif result = 8 then
+            sendln PASS
+        elseif result = 9 then
+            sendln ''
+        elseif result = 10 then
+            sendln 'n'
+        else
+            DETAIL = 'Initial Prompt Timeout'
+            return
+        endif
+    endwhile
+
+    ; 【関門2】特権モードへの昇格
+    if INIT_SYM_IDX <> 2 then
+        sendln 'enable'
+        timeout = 5
+        wait 'Password:' 'password:' '#' 'Invalid' 'Unknown' 'not found' 'Error' 'syntax' '>' '$'
+        
+        if result = 1 or result = 2 then
+            strlen EN_PASS
+            if result > 0 then
+                sendln EN_PASS
+            else
+                sendln ''
+            endif
+            
+            timeout = 5
+            wait '#' ']' 'Password:' 'password:' 'denied' 'Invalid' 'failed' '>'
+            if result <> 1 and result <> 2 then
+                DETAIL = 'Enable Authentication Failed'
+                return
+            endif
+
+        elseif result = 3 then
+            ; パスワードなしで '#' 昇格完了
+        elseif result >= 4 and result <= 8 then
+            wait '>' '$' '%' ']' '#'
+            strlen EN_PASS
+            if result > 0 then
+                sendln 'administrator'
+                timeout = 3
+                wait 'Password:' 'password:' '#' 'Error' 'Invalid' '>'
+                if result = 1 or result = 2 then
+                    sendln EN_PASS
+                    wait '#' '>'
+                endif
+            endif
+        elseif result = 0 then
+            DETAIL = 'Enable Command Timeout'
+            return
+        endif
+    endif
+
+    ; 【関門3】ページ送り（--More--）無効化の総当たり
+    timeout = 2
+
+    sendln 'terminal length 0'
+    wait '#' '>' '$' '%' ']'
+
+    sendln 'set cli screen-length 0'
+    wait '#' '>' '$' '%' ']'
+
+    sendln 'screen-length 0 temporary'
+    wait '#' '>' '$' '%' ']'
+
+    sendln 'console lines infinity'
+    wait '#' '>' '$' '%' ']'
+
+    sendln 'config paging disable'
+    wait '#' '>' '$' '%' ']'
+
+    ; 最終プロンプト記号の確定
+    timeout = 5
+    sendln ''
+    wait '#' '>' '$' '%' ']'
+    if result = 0 then
+        DETAIL = 'Final Prompt Check Failed'
+        return
+    endif
+
+    if result = 1 then
+        FINAL_SYM = '#'
+    elseif result = 2 then
+        FINAL_SYM = '>'
+    elseif result = 3 then
+        FINAL_SYM = '$'
+    elseif result = 4 then
+        FINAL_SYM = '%'
+    elseif result = 5 then
+        FINAL_SYM = ']'
+    endif
+
+    PREP_OK = 1
+return
+
+
+; ==============================================================================
+; サブルーチン：あらゆる機器から確実に抜ける（多段階ログアウト＋最終強制切断）
+; ==============================================================================
+:safe_logout
+    send #3
+    mpause 200
+
+    for i 1 3
+        testlink
+        if result = 0 then
+            break
+        endif
+
+        if i = 1 then
+            sendln 'exit'
+        elseif i = 2 then
+            sendln 'quit'
+        else
+            sendln 'logout'
+        endif
+
+        timeout = 2
+        wait 'Save' 'save' '(y/n)' '[y/n]' 'Are you sure' '>' '#' '$' ']'
+
+        if result = 1 or result = 2 then
+            sendln 'n'
+            mpause 300
+        elseif result >= 3 and result <= 5 then
+            sendln 'y'
+            mpause 300
+        elseif result >= 6 and result <= 9 then
+            continue
+        endif
+    next
+
+    testlink
+    if result <> 0 then
+        disconnect 0
+        mpause 300
+    endif
+return
+
+
+; ==============================================================================
+; ユーティリティ群
+; ==============================================================================
+:cleanup_and_summary
+    if IS_LOG_OPEN = 1 then
+        logclose
+    endif
+    call write_summary
+return
+
+:write_summary
+    getdate TS '%Y/%m/%d %H:%M:%S'
+    fileopen sum_fh SUMMARY_FILE 1
+    sprintf2 SUM_LINE '%s,%s,%s,%s,%s,%s' TS HOSTNAME IP_ADDR FINAL_SYM STATUS DETAIL
+    filewriteln sum_fh SUM_LINE
+    fileclose sum_fh
+return
