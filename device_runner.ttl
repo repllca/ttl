@@ -1,26 +1,38 @@
 ; ========================================================
-; Tera Term 4.0x系 完全互換 TTLマクロ (マルチベンダー完全自動適応版)
+; Tera Term 4.0x系 完全互換 TTLマクロ (マルチベンダー完全自動適応・高信頼版)
 ; 概要: 事前に機器種別が不明な機器群に対しても、踏み台サーバ経由で
 ;       自動判定・自動昇格・ページング抑止を行い安全に参照系ログを収集する
 ;
-; 互換性保証 (Tera Term 4.02 / 4.0x対応):
-;   - strsplit (4.67+), break (4.53+), continue (4.77+), sprintf2 (4.62+) 等の
-;     新設コマンドを一切使用せず、strscan/strcopy/goto/call による厳密互換設計
-;   - すべての wait コマンド引数を最大10個以内に厳守
-;   - ログ保存先ディレクトリ指定 & 自動フォルダ作成 (mkdir)
+; 主な信頼性向上策:
+;   1. getdir / setdir による基準ディレクトリカレント化 (相対パス問題の完全解決)
+;   2. 踏み台セッション保護: 接続未確立時は exit を送らず Ctrl+C で安全復帰
+;   3. クリーンログ設計: ログイン・昇格・ページャー無効化の成功直後に logopen
+;   4. ログ保存先エラー自動フォールバック: 指定フォルダ作成失敗時はマクロ直下に退避
+;   5. Tera Term 4.02 厳格互換 (strsplit/break/continue 不使用、wait 最大10引数)
 ; ========================================================
 
 ; --------------------------------------------------------
-; 1. 踏み台サーバおよび全体設定
+; 1. 基準ディレクトリ設定 (相対パス解決)
+; --------------------------------------------------------
+getdir BASE_DIR
+setdir BASE_DIR
+
+; 共通ファイルパス (マクロと同じフォルダ基準)
+sprintf '%s\device.csv' BASE_DIR
+CSV_FILE = inputstr
+
+DEFAULT_CMD = 'commands_universal.txt'
+
+sprintf '%s\logs' BASE_DIR
+DEF_LOG_DIR = inputstr
+
+; --------------------------------------------------------
+; 2. 踏み台サーバおよび実行設定
 ; --------------------------------------------------------
 BASTION_HOST   = '192.168.1.1'      ; 踏み台サーバのIPまたはホスト名
 BASTION_PORT   = '22'               ; 踏み台サーバのSSHポート
 BASTION_USER   = 'bastion_user'     ; 踏み台サーバのログインユーザ名
 BASTION_PROMPT = '$'                ; 踏み台サーバのプロンプト記号 ($, # 等)
-
-CSV_FILE       = 'device.csv'       ; 機器リストCSVファイル名
-DEFAULT_CMD    = 'commands_universal.txt' ; コマンド未指定時の汎用ファイル
-DEF_LOG_DIR    = 'logs'             ; ログ保存先ディレクトリの初期値
 
 ; 引数判定 (paramcnt >= 3 の場合は自動テスト/非対話モードとしてポップアップをバイパス)
 if paramcnt >= 3 then
@@ -28,7 +40,7 @@ if paramcnt >= 3 then
     BASTION_PASS = param3
 else
     ; ログ保存先ディレクトリの入力ダイアログ
-    inputbox 'ログ保存先ディレクトリのパスを入力してください:' 'ログ保存先設定' DEF_LOG_DIR
+    inputbox 'ログ保存先ディレクトリのパスを入力してください（存在しない場合は自動作成されます）:' 'ログ保存先設定' DEF_LOG_DIR
     LOG_DIR = inputstr
 
     strlen LOG_DIR
@@ -62,26 +74,33 @@ if result = 0 then
     strcopy LOG_DIR 1 CUT_LEN LOG_DIR
 endif
 
-; Windows環境でディレクトリが存在しない場合に備えて自動作成
+; 保存先ディレクトリの自動作成
 sprintf 'cmd.exe /c if not exist "%s" mkdir "%s"' LOG_DIR LOG_DIR
 exec inputstr 'hide'
-mpause 300
+mpause 500
 
-; 実行開始時刻とサマリCSVの準備
+; 実行開始時刻とサマリCSVの準備（書き込みテストも兼ねる）
 getdate RUN_ID '%Y%m%d_%H%M%S'
-SUMMARY_FILE = LOG_DIR
-strconcat SUMMARY_FILE '\summary_'
-strconcat SUMMARY_FILE RUN_ID
-strconcat SUMMARY_FILE '.csv'
+sprintf '%s\summary_%s.csv' LOG_DIR RUN_ID
+SUMMARY_FILE = inputstr
 
 fileopen f_sum SUMMARY_FILE 0
-if f_sum <> -1 then
-    filewriteln f_sum 'Timestamp,Hostname,IP,Protocol,Prompt,Status,Detail'
-    fileclose f_sum
+if f_sum = -1 then
+    ; 指定フォルダへ書き込めない場合は BASE_DIR 直下へフォールバック
+    LOG_DIR = BASE_DIR
+    sprintf '%s\summary_%s.csv' LOG_DIR RUN_ID
+    SUMMARY_FILE = inputstr
+    fileopen f_sum SUMMARY_FILE 0
+    if f_sum = -1 then
+        messagebox 'ログ保存先ディレクトリに書き込みできません。権限を確認してください。' 'エラー'
+        end
+    endif
 endif
+filewriteln f_sum 'Timestamp,Hostname,IP,Protocol,Prompt,Status,Detail'
+fileclose f_sum
 
 ; --------------------------------------------------------
-; 2. 踏み台サーバへのSSH接続 (4.0x互換構文)
+; 3. 踏み台サーバへのSSH接続 (4.0x互換構文)
 ; --------------------------------------------------------
 sprintf '%s:%s /ssh /2 /auth=password /user=%s /passwd=%s' BASTION_HOST BASTION_PORT BASTION_USER BASTION_PASS
 connect inputstr
@@ -100,17 +119,25 @@ if result = 0 then
 endif
 
 ; --------------------------------------------------------
-; 3. device.csv の読み込みループ
+; 4. device.csv の読み込みループ
 ; --------------------------------------------------------
 fileopen f_csv CSV_FILE 0 1
 if f_csv = -1 then
-    messagebox 'device.csv を開くことができませんでした。' 'エラー'
+    messagebox 'device.csv を開くことができませんでした。マクロと同じフォルダに配置されているか確認してください。' 'エラー'
     sendln 'exit'
     disconnect 0
     end
 endif
 
 :read_csv_loop
+; 踏み台セッションが生きているか確認
+testlink
+if result = 0 then
+    messagebox '踏み台サーバとの通信が切断されたため処理を中断します。' '通信切断'
+    fileclose f_csv
+    end
+endif
+
 filereadln f_csv line
 if result = 1 goto end_csv_loop     ; ファイル末尾(EOF)到達
 
@@ -122,7 +149,7 @@ strcopy line 1 1 first_char
 strcompare first_char '#'
 if result = 0 goto read_csv_loop
 
-; 4.0x互換CSVパーサーサブルーチン呼び出し (strsplit不使用)
+; 4.0x互換CSVパーサーサブルーチン呼び出し
 call parse_csv_line
 
 ; ヘッダ行スキップ
@@ -172,30 +199,36 @@ if result = 0 then
     DEV_CMD = DEFAULT_CMD
 endif
 
-; ログファイル名 (例: logs\RT-01_20261116_093000.log)
-getdate DATE_STR '%Y%m%d_%H%M%S'
-LOG_FILE = LOG_DIR
-strconcat LOG_FILE '\'
-strconcat LOG_FILE DEV_NAME
-strconcat LOG_FILE '_'
-strconcat LOG_FILE DATE_STR
-strconcat LOG_FILE '.log'
-logopen LOG_FILE 0 0
+; 相対パス（フォルダ区切りやドライブレターを持たない場合）は BASE_DIR を付与
+strscan DEV_CMD '\'
+if result = 0 then
+    strscan DEV_CMD '/'
+    if result = 0 then
+        strscan DEV_CMD ':'
+        if result = 0 then
+            sprintf '%s\%s' BASE_DIR DEV_CMD
+            DEV_CMD = inputstr
+        endif
+    endif
+endif
 
+; 変数初期化
 DEV_STATUS = 'NG'
 DEV_DETAIL = 'Unknown'
 FINAL_PROMPT = '?'
+IS_LOG_OPEN = 0
+IS_DEVICE_LOGGED_IN = 0
 
 ; --------------------------------------------------------
-; 4. 踏み台から対象機器へ接続コマンド発行
+; 5. 踏み台から対象機器へ接続コマンド発行
 ; --------------------------------------------------------
 strcompare DEV_PROTO 'telnet'
 if result = 0 goto do_telnet
 strcompare DEV_PROTO 'TELNET'
 if result = 0 goto do_telnet
 
-; === SSH接続コマンド ===
-SEND_CMD = 'ssh -o StrictHostKeyChecking=no '
+; === SSH接続コマンド (KnownHostsの競合やフィンガープリント警告を防止) ===
+SEND_CMD = 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null '
 strlen DEV_USER
 if result > 0 then
     strconcat SEND_CMD DEV_USER
@@ -212,7 +245,7 @@ strconcat SEND_CMD DEV_IP
 sendln SEND_CMD
 
 ; --------------------------------------------------------
-; 5. ログイン交渉ループ (機器種別不明・バナー・多段認証を自動突破)
+; 6. ログイン交渉ループ (機器種別不明・バナー・多段認証を自動突破)
 ; --------------------------------------------------------
 :login_negotiate_loop
 LOGIN_SUCCESS = 0
@@ -228,6 +261,7 @@ if result >= 1 and result <= 5 then
     ; ログイン完了！プロンプト到達
     LOGIN_SUCCESS = 1
     INIT_PROMPT_IDX = result
+    IS_DEVICE_LOGGED_IN = 1
     goto login_success_exit
 endif
 
@@ -250,9 +284,9 @@ if result = 9 then
 endif
 
 if result = 10 then
-    ; 踏み台に戻ってしまった（接続拒否またはホスト不在）
-    DEV_DETAIL = 'Connection Rejected'
-    goto cleanup_device
+    ; 踏み台プロンプトに戻った（接続拒否または相手ホスト不在）
+    DEV_DETAIL = 'Connection Rejected / Host Unreachable'
+    goto record_result
 endif
 
 if result = 0 then
@@ -263,14 +297,21 @@ if result = 0 then
     if result >= 1 and result <= 5 then
         LOGIN_SUCCESS = 1
         INIT_PROMPT_IDX = result
+        IS_DEVICE_LOGGED_IN = 1
         goto login_success_exit
     endif
     if result = 6 then
         sendln DEV_PASS
         goto login_retry_loop
     endif
+
+    ; 接続失敗：まだ相手に入っていないため、Ctrl+C で踏み台に戻る (exit は送らない)
+    send #3
+    mpause 300
+    sendln ''
+    wait BASTION_PROMPT '$' '#'
     DEV_DETAIL = 'Login Timeout'
-    goto cleanup_device
+    goto record_result
 endif
 
 :login_success_exit
@@ -280,7 +321,7 @@ if LOGIN_SUCCESS = 0 then
 endif
 
 ; --------------------------------------------------------
-; 6. 特権モード(管理者昇格)の自動適応
+; 7. 特権モード(管理者昇格)の自動適応
 ; --------------------------------------------------------
 ; 初期プロンプトがすでに対象特権(#, ], $, %)の場合は昇格処理不要
 if INIT_PROMPT_IDX >= 2 and INIT_PROMPT_IDX <= 5 goto disable_paging
@@ -307,10 +348,9 @@ elseif result >= 4 and result <= 8 then
         wait '#' '>' '$'
     endif
 endif
-; 昇格に失敗した場合や最初から不要な場合でも、エラー中断せず通常モードで続行
 
 ; --------------------------------------------------------
-; 7. ページ送り抑止の総当たり送信 (マルチベンダー対応)
+; 8. ページ送り抑止の総当たり送信 (マルチベンダー対応)
 ; --------------------------------------------------------
 :disable_paging
 timeout = 2
@@ -353,7 +393,19 @@ else
 endif
 
 ; --------------------------------------------------------
-; 8. コマンドファイルの実行 (ページング自動検知・スペース送信)
+; 9. クリーンログ取得開始 (ログイン・前処理成功後のみ開く)
+; --------------------------------------------------------
+getdate DATE_STR '%Y%m%d_%H%M%S'
+sprintf '%s\%s_%s.log' LOG_DIR DEV_NAME DATE_STR
+LOG_FILE = inputstr
+
+; 既存ログがあれば閉じてから新規オープン (4.02ではlogopenはresultを変更しないため無条件設定)
+logclose
+logopen LOG_FILE 0 0
+IS_LOG_OPEN = 1
+
+; --------------------------------------------------------
+; 10. コマンドファイルの実行 (ページング自動検知・スペース送信)
 ; --------------------------------------------------------
 fileopen f_cmd DEV_CMD 0 1
 if f_cmd = -1 then
@@ -409,50 +461,56 @@ DEV_STATUS = 'OK'
 DEV_DETAIL = 'Success'
 
 ; --------------------------------------------------------
-; 9. 安全な多段階ログアウト (踏み台プロンプト復帰)
+; 11. 対象機器からの安全離脱 (踏み台セッションは絶対に殺さない)
 ; --------------------------------------------------------
 :cleanup_device
-; exit 送信
-timeout = 3
-sendln 'exit'
-wait BASTION_PROMPT 'Save' '(y/n)' '[y/n]' '>' '#' '$' ']'
-if result = 1 goto logout_complete
-if result >= 2 and result <= 4 then
-    sendln 'n'
+if IS_DEVICE_LOGGED_IN = 1 then
+    ; 機器に入っている場合のみ exit / quit を送信して踏み台に戻る
+    timeout = 3
+    sendln 'exit'
+    wait BASTION_PROMPT 'Save' '(y/n)' '[y/n]' '>' '#' '$' ']'
+    if result = 1 goto cleanup_done
+    if result >= 2 and result <= 4 then
+        sendln 'n'
+    endif
+
+    sendln 'exit'
+    timeout = 3
+    wait BASTION_PROMPT 'Save' '(y/n)' '[y/n]'
+    if result = 1 goto cleanup_done
+    if result >= 2 and result <= 4 then
+        sendln 'n'
+    endif
+
+    sendln 'quit'
+    timeout = 3
+    wait BASTION_PROMPT
+    if result = 1 goto cleanup_done
+
+    send #3
+    mpause 200
+    sendln 'exit'
+    timeout = 3
+    wait BASTION_PROMPT
+    if result = 1 goto cleanup_done
+
+    send '~.'
+    mpause 500
+    sendln ''
+    wait BASTION_PROMPT
 endif
 
-; enable やサブモード抜けのため再度 exit
-sendln 'exit'
-timeout = 3
-wait BASTION_PROMPT 'Save' '(y/n)' '[y/n]'
-if result = 1 goto logout_complete
-if result >= 2 and result <= 4 then
-    sendln 'n'
+:cleanup_done
+; ログが開かれていればクローズ
+if IS_LOG_OPEN = 1 then
+    logclose
+    IS_LOG_OPEN = 0
 endif
 
-; Juniper / WLC 向けの quit
-sendln 'quit'
-timeout = 3
-wait BASTION_PROMPT
-if result = 1 goto logout_complete
-
-; 強制切断 (Ctrl+C 送信後に exit、さらに SSH エスケープ ~.)
-send #3
-mpause 200
-sendln 'exit'
-timeout = 3
-wait BASTION_PROMPT
-if result = 1 goto logout_complete
-
-send '~.'
-mpause 500
-sendln ''
-wait BASTION_PROMPT
-
-:logout_complete
-logclose
-
-; サマリCSVに結果行を追記
+; --------------------------------------------------------
+; 12. サマリCSVへの追記
+; --------------------------------------------------------
+:record_result
 getdate TS '%Y/%m/%d %H:%M:%S'
 fileopen f_sum SUMMARY_FILE 1
 if f_sum <> -1 then
@@ -461,11 +519,11 @@ if f_sum <> -1 then
     fileclose f_sum
 endif
 
-pause 1
+mpause 500
 goto read_csv_loop
 
 ; --------------------------------------------------------
-; 10. 全機器終了処理
+; 13. 全機器終了処理
 ; --------------------------------------------------------
 :end_csv_loop
 fileclose f_csv
@@ -499,8 +557,12 @@ end
     strscan PARSE_STR ','
     if result = 0 goto parse_col1_only
     POS = result
-    COPY_LEN = POS - 1
-    strcopy PARSE_STR 1 COPY_LEN COL1
+    if POS = 1 then
+        COL1 = ''
+    else
+        COPY_LEN = POS - 1
+        strcopy PARSE_STR 1 COPY_LEN COL1
+    endif
     START_POS = POS + 1
     strlen PARSE_STR
     REM_LEN = result - POS
@@ -510,8 +572,12 @@ end
     strscan PARSE_STR ','
     if result = 0 goto parse_col2_only
     POS = result
-    COPY_LEN = POS - 1
-    strcopy PARSE_STR 1 COPY_LEN COL2
+    if POS = 1 then
+        COL2 = ''
+    else
+        COPY_LEN = POS - 1
+        strcopy PARSE_STR 1 COPY_LEN COL2
+    endif
     START_POS = POS + 1
     strlen PARSE_STR
     REM_LEN = result - POS
@@ -521,8 +587,12 @@ end
     strscan PARSE_STR ','
     if result = 0 goto parse_col3_only
     POS = result
-    COPY_LEN = POS - 1
-    strcopy PARSE_STR 1 COPY_LEN COL3
+    if POS = 1 then
+        COL3 = ''
+    else
+        COPY_LEN = POS - 1
+        strcopy PARSE_STR 1 COPY_LEN COL3
+    endif
     START_POS = POS + 1
     strlen PARSE_STR
     REM_LEN = result - POS
@@ -532,8 +602,12 @@ end
     strscan PARSE_STR ','
     if result = 0 goto parse_col4_only
     POS = result
-    COPY_LEN = POS - 1
-    strcopy PARSE_STR 1 COPY_LEN COL4
+    if POS = 1 then
+        COL4 = ''
+    else
+        COPY_LEN = POS - 1
+        strcopy PARSE_STR 1 COPY_LEN COL4
+    endif
     START_POS = POS + 1
     strlen PARSE_STR
     REM_LEN = result - POS
@@ -543,8 +617,12 @@ end
     strscan PARSE_STR ','
     if result = 0 goto parse_col5_only
     POS = result
-    COPY_LEN = POS - 1
-    strcopy PARSE_STR 1 COPY_LEN COL5
+    if POS = 1 then
+        COL5 = ''
+    else
+        COPY_LEN = POS - 1
+        strcopy PARSE_STR 1 COPY_LEN COL5
+    endif
     START_POS = POS + 1
     strlen PARSE_STR
     REM_LEN = result - POS
@@ -554,8 +632,12 @@ end
     strscan PARSE_STR ','
     if result = 0 goto parse_col6_only
     POS = result
-    COPY_LEN = POS - 1
-    strcopy PARSE_STR 1 COPY_LEN COL6
+    if POS = 1 then
+        COL6 = ''
+    else
+        COPY_LEN = POS - 1
+        strcopy PARSE_STR 1 COPY_LEN COL6
+    endif
     START_POS = POS + 1
     strlen PARSE_STR
     REM_LEN = result - POS

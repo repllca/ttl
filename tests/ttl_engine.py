@@ -46,6 +46,7 @@ class TTLEngine:
                 self.vars[f"param{i}"] = p
         self.labels = {}
         self.call_stack = []
+        self.if_stack = []
         self.open_files = {}
         self.next_fd = 1
         self.active_log = None
@@ -124,7 +125,19 @@ class TTLEngine:
             self._handle_if(code)
             return
 
-        if cmd in ("endif", "else", "elseif"):
+        if cmd == "elseif":
+            # Reached while executing a previous true branch; skip to endif
+            self._skip_to_endif()
+            return
+
+        if cmd == "else":
+            # Reached while executing a previous true branch; skip to endif
+            self._skip_to_endif()
+            return
+
+        if cmd == "endif":
+            if self.if_stack:
+                self.if_stack.pop()
             self.pc += 1
             return
 
@@ -229,6 +242,22 @@ class TTLEngine:
         if cmd == "connect":
             # Simulate successful connection to bastion (result = 2)
             self.vars["result"] = 2
+            self.pc += 1
+            return
+
+        # 13b. testlink
+        if cmd == "testlink":
+            self.vars["result"] = 0 if self.mock_session.state == "DISCONNECTED" else 2
+            self.pc += 1
+            return
+
+        # 13c. getdir / setdir
+        if cmd == "getdir":
+            self.vars[parts[1]] = self.workspace_dir
+            self.pc += 1
+            return
+
+        if cmd == "setdir":
             self.pc += 1
             return
 
@@ -343,7 +372,11 @@ class TTLEngine:
             fname_clean = os.path.normpath(fname.replace("\\", os.sep).replace("/", os.sep))
             filepath = os.path.join(self.workspace_dir, fname_clean) if not os.path.isabs(fname_clean) else fname_clean
             os.makedirs(os.path.dirname(filepath), exist_ok=True)
-            self.active_log = open(filepath, "w", encoding="utf-8")
+            try:
+                self.active_log = open(filepath, "w", encoding="utf-8")
+                self.vars["result"] = 0
+            except Exception:
+                self.vars["result"] = 1
             self.pc += 1
             return
 
@@ -392,7 +425,7 @@ class TTLEngine:
         # Support:
         # if <cond> goto <label>
         # if <cond> then
-        # if <cond> <var> = <expr>
+        # if <cond> <statement>
         m_then = re.match(r"^if\s+(.*?)\s+then$", code, re.IGNORECASE)
         m_goto = re.match(r"^if\s+(.*?)\s+goto\s+([a-zA-Z0-9_]+)$", code, re.IGNORECASE)
 
@@ -408,10 +441,11 @@ class TTLEngine:
         if m_then:
             cond_str = m_then.group(1)
             if self._eval_condition(cond_str):
+                self.if_stack.append(True)
                 self.pc += 1
             else:
-                # Skip to matching else, elseif, or endif
-                self._skip_if_block()
+                self.if_stack.append(False)
+                self._skip_to_next_clause()
             return
 
         # Default Format 1: if <cond> <statement>
@@ -427,7 +461,7 @@ class TTLEngine:
 
         self.pc += 1
 
-    def _skip_if_block(self):
+    def _skip_to_next_clause(self):
         depth = 1
         self.pc += 1
         while self.pc < len(self.instructions):
@@ -437,11 +471,37 @@ class TTLEngine:
             elif re.match(r"^endif\b", code, re.IGNORECASE):
                 depth -= 1
                 if depth == 0:
+                    if self.if_stack:
+                        self.if_stack.pop()
                     self.pc += 1
                     return
-            elif depth == 1 and re.match(r"^else\b", code, re.IGNORECASE):
-                self.pc += 1
-                return
+            elif depth == 1:
+                if re.match(r"^elseif\b.*?\bthen\b", code, re.IGNORECASE):
+                    m = re.match(r"^elseif\s+(.*?)\s+then$", code, re.IGNORECASE)
+                    if m and self._eval_condition(m.group(1)):
+                        self.if_stack[-1] = True
+                        self.pc += 1
+                        return
+                elif re.match(r"^else\b", code, re.IGNORECASE):
+                    self.if_stack[-1] = True
+                    self.pc += 1
+                    return
+            self.pc += 1
+
+    def _skip_to_endif(self):
+        depth = 1
+        self.pc += 1
+        while self.pc < len(self.instructions):
+            _, code = self.instructions[self.pc]
+            if re.match(r"^if\b.*?\bthen\b", code, re.IGNORECASE):
+                depth += 1
+            elif re.match(r"^endif\b", code, re.IGNORECASE):
+                depth -= 1
+                if depth == 0:
+                    if self.if_stack:
+                        self.if_stack.pop()
+                    self.pc += 1
+                    return
             self.pc += 1
 
     def _eval_condition(self, cond_str):
@@ -453,6 +513,10 @@ class TTLEngine:
                 return token.lower()
             if token in self.vars:
                 val = self.vars[token]
+                if isinstance(val, int):
+                    return str(val)
+                if isinstance(val, str) and (val.isdigit() or (val.startswith("-") and val[1:].isdigit())):
+                    return str(int(val))
                 if isinstance(val, str):
                     return f"'{val}'"
                 return str(val)
@@ -484,7 +548,10 @@ class TTLEngine:
             v1 = int(self._eval_token(m_op.group(1)))
             v2 = int(self._eval_token(m_op.group(3)))
             return v1 + v2 if m_op.group(2) == "+" else v1 - v2
-        return expr_str
+        try:
+            return int(expr_str)
+        except ValueError:
+            return expr_str
 
     def _eval_token(self, token):
         token = token.strip()

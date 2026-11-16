@@ -23,6 +23,11 @@ class MockSession:
 
     def receive_input(self, text):
         """Process input sent from TTL macro (sendln / send)."""
+        if "\x03" in text:
+            # Ctrl+C sent: abort current device connection and return to bastion
+            self.state = "BASTION"
+            return "^C\r\nbastion_user@bastion:~$ "
+
         lines = text.split("\n")
         response = ""
         for line in lines:

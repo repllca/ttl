@@ -8,8 +8,8 @@ and successfully connects, automates authentication, collects commands, and prod
 import os
 import glob
 import unittest
-from mock_lab import MockSession
-from ttl_engine import TTLEngine
+from tests.mock_lab import MockSession
+from tests.ttl_engine import TTLEngine
 
 WORKSPACE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TTL_FILE = os.path.join(WORKSPACE_DIR, "device_runner.ttl")

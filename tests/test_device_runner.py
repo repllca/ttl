@@ -17,7 +17,7 @@ VALID_TTL_402_COMMANDS = {
     "strconcat", "strcopy", "strcompare", "strlen", "strscan", "sprintf", "getdate",
     "logopen", "logwrite", "logclose", "pause", "mpause", "timeout", "end", "goto",
     "if", "then", "else", "elseif", "endif",
-    "closett", "call", "return", "exec"
+    "closett", "call", "return", "exec", "getdir", "setdir", "testlink"
 }
 
 class TestTTLSyntax(unittest.TestCase):
