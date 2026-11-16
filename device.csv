@@ -1,11 +1,13 @@
 # ホスト名,IPアドレス,ユーザー名,パスワード,管理者パスワード,プロトコル,コマンドファイル
-# 1. 全項目指定 (Cisco等、enableパスワードあり)
+# 1. ログイン前に機種が完全に不明な場合（プロトコル・管理者PW・コマンドファイル全て未指定で全自動適応）
+UNKNOWN-NODE-01,192.168.10.99,,,,,
+# 2. Cisco等 (管理者PW指定、専用コマンドファイル指定)
 RT-CISCO-01,192.168.10.1,admin,Pass1234,EnablePass123,ssh,commands_cisco.txt
-# 2. 管理者パスワード未記載 (通常パスワードをenableパスワードに自動流用)
+# 3. Cisco等 (管理者PW未記載 -> 通常PW流用)
 SW-CISCO-02,192.168.10.2,admin,Pass1234,,ssh,commands_cisco.txt
-# 3. プロトコル未記載 (デフォルトで ssh を適用)、enable不要機器
+# 4. Linux等 (enable不要機器、コマンド指定)
 SRV-LINUX-01,192.168.10.3,user1,Pass1234,,,commands_linux.txt
-# 4. ユーザ名・パスワード未記載 (踏み台のユーザ名・パスワードを自動流用)
+# 5. Juniper等 (踏み台クレデンシャル流用)
 RT-JUNIPER-01,192.168.10.4,,,,ssh,commands_juniper.txt
-# 5. Telnet接続
+# 6. レガシーTelnet機器
 SW-LEGACY-01,192.168.10.5,admin,Pass1234,,telnet,commands_cisco.txt

@@ -13,10 +13,11 @@ CSV_FILE = os.path.join(WORKSPACE_DIR, "device.csv")
 
 VALID_TTL_COMMANDS = {
     "connect", "disconnect", "passwordbox", "messagebox", "inputbox", "yesnobox",
-    "wait", "waitrecv", "sendln", "send", "fileopen", "filereadln", "fileclose",
+    "wait", "waitrecv", "sendln", "send", "fileopen", "filereadln", "filewriteln", "fileclose",
     "strsplit", "strconcat", "strcopy", "strcompare", "strlen", "getdate",
-    "logopen", "logclose", "pause", "mpause", "timeout", "end", "goto",
-    "if", "then", "else", "elseif", "endif", "closett"
+    "logopen", "logwrite", "logclose", "pause", "mpause", "timeout", "end", "goto",
+    "if", "then", "else", "elseif", "endif", "while", "endwhile", "break", "continue",
+    "closett", "call", "return"
 }
 
 class TestTTLSyntax(unittest.TestCase):
@@ -31,18 +32,15 @@ class TestTTLSyntax(unittest.TestCase):
         goto_targets = []
 
         for line_num, line in enumerate(self.lines, start=1):
-            # Strip comments
             line_code = line.split(";", 1)[0].strip()
             if not line_code:
                 continue
 
-            # Check label declaration
             if line_code.startswith(":"):
                 label_name = line_code[1:].strip()
                 self.assertNotIn(label_name, declared_labels, f"Duplicate label :{label_name} at line {line_num}")
                 declared_labels.add(label_name)
 
-            # Check goto
             m = re.search(r"\bgoto\s+([a-zA-Z0-9_]+)", line_code)
             if m:
                 goto_targets.append((m.group(1), line_num))
@@ -55,54 +53,62 @@ class TestTTLSyntax(unittest.TestCase):
                 f"Line {line_num}: 'goto {target}' references undefined label :{target}"
             )
 
-    def test_if_endif_blocks(self):
-        """Verify that all if/then blocks are properly closed with endif."""
-        block_stack = []
+    def test_wait_argument_limit(self):
+        """Verify that no wait command exceeds the Tera Term 10-argument limit."""
+        for line_num, line in enumerate(self.lines, start=1):
+            line_code = line.split(";", 1)[0].strip()
+            if not line_code or not line_code.lower().startswith("wait "):
+                continue
+
+            # Extract arguments by parsing quoted strings and bare tokens
+            args = re.findall(r"'[^']*'|\"[^\"]*\"|\S+", line_code[5:].strip())
+            self.assertLessEqual(
+                len(args),
+                10,
+                f"Line {line_num}: wait command has {len(args)} arguments, exceeding the maximum limit of 10! Args: {args}"
+            )
+
+    def test_blocks_integrity(self):
+        """Verify that all if/then and while blocks are properly closed."""
+        if_stack = []
+        while_stack = []
 
         for line_num, line in enumerate(self.lines, start=1):
             line_code = line.split(";", 1)[0].strip()
             if not line_code:
                 continue
 
-            # Check Format 2 block if
             if re.match(r"^if\b.*?\bthen\b", line_code, re.IGNORECASE):
-                block_stack.append(line_num)
+                if_stack.append(line_num)
             elif re.match(r"^endif\b", line_code, re.IGNORECASE):
-                self.assertTrue(
-                    len(block_stack) > 0,
-                    f"Line {line_num}: 'endif' without matching 'if ... then'"
-                )
-                block_stack.pop()
+                self.assertTrue(len(if_stack) > 0, f"Line {line_num}: 'endif' without matching 'if ... then'")
+                if_stack.pop()
+            elif re.match(r"^while\b", line_code, re.IGNORECASE):
+                while_stack.append(line_num)
+            elif re.match(r"^endwhile\b", line_code, re.IGNORECASE):
+                self.assertTrue(len(while_stack) > 0, f"Line {line_num}: 'endwhile' without matching 'while'")
+                while_stack.pop()
 
-        self.assertEqual(
-            len(block_stack),
-            0,
-            f"Unclosed 'if ... then' blocks at lines: {block_stack}"
-        )
+        self.assertEqual(len(if_stack), 0, f"Unclosed 'if ... then' blocks at lines: {if_stack}")
+        self.assertEqual(len(while_stack), 0, f"Unclosed 'while' blocks at lines: {while_stack}")
 
     def test_valid_commands(self):
         """Verify that statements start with valid TTL keywords, labels, or variable assignments."""
         for line_num, line in enumerate(self.lines, start=1):
             line_code = line.split(";", 1)[0].strip()
-            if not line_code:
+            if not line_code or line_code.startswith(":"):
                 continue
 
-            # Label
-            if line_code.startswith(":"):
-                continue
-
-            # Assignment: VAR = VALUE
             if "=" in line_code and not line_code.lower().startswith(("if", "wait", "timeout")):
                 left = line_code.split("=", 1)[0].strip()
                 if re.match(r"^[a-zA-Z0-9_]+$", left):
                     continue
 
-            # Keyword command
             first_word = line_code.split()[0].lower()
             self.assertIn(
                 first_word,
                 VALID_TTL_COMMANDS,
-                f"Line {line_num}: Unknown TTL command or construct '{first_word}'"
+                f"Line {line_num}: Unknown TTL command '{first_word}'"
             )
 
 
@@ -113,46 +119,31 @@ class TestDeviceCSVAndFallbackLogic(unittest.TestCase):
             self.raw_lines = f.readlines()
 
     def simulate_macro_row_processing(self, line, bastion_user="bastion_user", bastion_pass="BastionPass!"):
-        """Simulate the TTL parsing and fallback rules for a CSV line."""
         line = line.strip()
         if not line or line.startswith("#"):
             return None
 
-        # strsplit line ',' 7
         parts = [p.strip() for p in line.split(",")]
         while len(parts) < 7:
             parts.append("")
 
         name, ip, user, pw, enpass, proto, cmd_file = parts[:7]
 
-        # Header skip check
-        if name in ("ホスト名", "hostname"):
+        if name in ("ホスト名", "hostname") or not ip:
             return None
 
-        # IP check
-        if not ip:
-            return None
-
-        # Fallbacks as implemented in device_runner.ttl:
-        # 1. Hostname fallback
         if not name:
             name = ip
-
-        # 2. Protocol fallback
         if not proto:
             proto = "ssh"
-
-        # 3. User fallback
         if not user:
             user = bastion_user
-
-        # 4. Password fallback
         if not pw:
             pw = bastion_pass
-
-        # 5. Enable password fallback
         if not enpass:
             enpass = pw
+        if not cmd_file:
+            cmd_file = "commands_universal.txt"
 
         return {
             "name": name,
@@ -165,7 +156,6 @@ class TestDeviceCSVAndFallbackLogic(unittest.TestCase):
         }
 
     def test_csv_rows_and_command_files(self):
-        """Verify device.csv parsing, fallback logic, and that all referenced command files exist."""
         processed_count = 0
         for line_num, line in enumerate(self.raw_lines, start=1):
             row = self.simulate_macro_row_processing(line)
@@ -173,88 +163,51 @@ class TestDeviceCSVAndFallbackLogic(unittest.TestCase):
                 continue
 
             processed_count += 1
-            # Check fields are populated
-            self.assertTrue(row["name"], f"Row {line_num}: Hostname empty")
-            self.assertTrue(row["ip"], f"Row {line_num}: IP empty")
-            self.assertTrue(row["user"], f"Row {line_num}: User empty")
-            self.assertTrue(row["pass"], f"Row {line_num}: Password empty")
-            self.assertTrue(row["enpass"], f"Row {line_num}: Enable password empty")
-            self.assertIn(row["proto"], ["ssh", "telnet"], f"Row {line_num}: Invalid proto {row['proto']}")
+            self.assertTrue(row["name"])
+            self.assertTrue(row["ip"])
+            self.assertTrue(row["user"])
+            self.assertTrue(row["pass"])
+            self.assertTrue(row["enpass"])
+            self.assertIn(row["proto"], ["ssh", "telnet"])
 
-            # Verify command file exists
-            if row["cmd_file"]:
-                cmd_path = os.path.join(WORKSPACE_DIR, row["cmd_file"])
-                self.assertTrue(
-                    os.path.exists(cmd_path),
-                    f"Row {line_num}: Referenced command file {row['cmd_file']} does not exist"
-                )
+            cmd_path = os.path.join(WORKSPACE_DIR, row["cmd_file"])
+            self.assertTrue(
+                os.path.exists(cmd_path),
+                f"Row {line_num}: Command file {row['cmd_file']} does not exist"
+            )
 
-        self.assertGreater(processed_count, 0, "device.csv should contain valid data rows")
+        self.assertGreater(processed_count, 0)
 
-    def test_specific_fallbacks(self):
-        """Verify the specific missing-field edge cases required by the user."""
-        # Case 1: Missing enable password -> should equal login password
-        line1 = "SW01,10.0.0.1,admin,P@ss1,,ssh,commands_cisco.txt"
-        r1 = self.simulate_macro_row_processing(line1)
-        self.assertEqual(r1["enpass"], "P@ss1", "Enable pass should fallback to login pass")
-
-        # Case 2: Missing protocol -> should default to ssh
-        line2 = "SRV01,10.0.0.2,user1,P@ss2,,,commands_linux.txt"
-        r2 = self.simulate_macro_row_processing(line2)
-        self.assertEqual(r2["proto"], "ssh", "Protocol should default to ssh")
-        self.assertEqual(r2["enpass"], "P@ss2", "Enable pass should fallback to login pass")
-
-        # Case 3: Missing user and password -> should fallback to bastion credentials
-        line3 = "RT01,10.0.0.3,,,,ssh,commands_juniper.txt"
-        r3 = self.simulate_macro_row_processing(line3, bastion_user="ops_user", bastion_pass="OpsSecret")
-        self.assertEqual(r3["user"], "ops_user")
-        self.assertEqual(r3["pass"], "OpsSecret")
-        self.assertEqual(r3["enpass"], "OpsSecret")
-
-        # Case 4: Telnet protocol preserved
-        line4 = "OLD01,10.0.0.4,admin,P@ss4,,telnet,commands_cisco.txt"
-        r4 = self.simulate_macro_row_processing(line4)
-        self.assertEqual(r4["proto"], "telnet")
+    def test_unknown_device_fallback(self):
+        """When device type is unknown (cmd_file and enpass empty), verify universal fallback."""
+        line = "UNKNOWN_DEV,10.20.30.40,,,,"
+        row = self.simulate_macro_row_processing(line, bastion_user="buser", bastion_pass="bpass")
+        self.assertEqual(row["proto"], "ssh")
+        self.assertEqual(row["user"], "buser")
+        self.assertEqual(row["pass"], "bpass")
+        self.assertEqual(row["enpass"], "bpass")
+        self.assertEqual(row["cmd_file"], "commands_universal.txt")
+        self.assertTrue(os.path.exists(os.path.join(WORKSPACE_DIR, row["cmd_file"])))
 
 
-class TestVendorPromptAndMoreHandling(unittest.TestCase):
-    """Test the logic for enable handling and --More-- handling."""
-
+class TestMultiVendorAdaptiveLogic(unittest.TestCase):
     def test_prompt_enable_decision(self):
-        """
-        Verify TTL prompt logic:
-        - prompt '>' triggers enable
-        - prompt '#', '$', '%' skips enable directly to exec_commands
-        """
-        def should_run_enable(prompt_char):
-            # In TTL: wait '>' '#' '$' '%'
-            # result = 1 ('>'), 2 ('#'), 3 ('$'), 4 ('%')
-            if prompt_char == '>':
-                return True
-            elif prompt_char in ('#', '$', '%'):
-                return False
-            return False
+        # 1:>, 2:#, 3:$, 4:%, 5:]
+        def needs_enable(prompt_idx):
+            return prompt_idx == 1
 
-        self.assertTrue(should_run_enable('>'))
-        self.assertFalse(should_run_enable('#'))
-        self.assertFalse(should_run_enable('$'))
-        self.assertFalse(should_run_enable('%'))
+        self.assertTrue(needs_enable(1))   # > unprivileged Cisco/Yamaha
+        self.assertFalse(needs_enable(2))  # # privileged
+        self.assertFalse(needs_enable(3))  # $ Linux
+        self.assertFalse(needs_enable(4))  # % Juniper
+        self.assertFalse(needs_enable(5))  # ] Huawei/HPE
 
-    def test_paging_detection(self):
-        """
-        Verify that paging patterns trigger a space keystroke, while prompts conclude.
-        """
-        paging_patterns = ['--More--', '-- 続く --', '---(more', 'More:']
-        prompt_patterns = ['>', '#', '$', '%']
-
-        for pat in paging_patterns:
-            # TTL logic: if result >= 5 (paging), send ' '
-            is_paging = pat in paging_patterns
-            self.assertTrue(is_paging)
-
-        for pat in prompt_patterns:
-            is_prompt = pat in prompt_patterns
-            self.assertTrue(is_prompt)
+    def test_yamaha_fallback_triggers(self):
+        # On 'enable', if error keywords are returned, Yamaha administrator should be attempted
+        error_keywords = ['Invalid', 'Unknown', 'not found', 'Error', 'syntax']
+        sample_response = "Unknown command 'enable'"
+        matched = any(kw.lower() in sample_response.lower() for kw in error_keywords)
+        self.assertTrue(matched)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,30 @@
+; ========================================================
+; 汎用情報取得コマンドリスト (マルチベンダー・機器種別不明時用)
+; 全て参照系コマンドのため、未対応の機器ではエラー表示でスキップされます
+; ========================================================
+
+; --- 機器情報・バージョン確認 ---
+show version
+show system
+show environment
+get system status
+uname -a
+cat /etc/os-release
+
+; --- インターフェース・IP状態確認 ---
+show ip interface brief
+show interfaces terse
+show status
+ip addr
+ifconfig
+
+; --- 設定・構成情報確認 ---
+show running-config
+show config
+show configuration | display set
+
+; --- リソース・ルーティング ---
+show ip route
+show route
+df -h
+free -m

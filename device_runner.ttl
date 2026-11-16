@@ -1,17 +1,26 @@
 ; ========================================================
-; Tera Term 4.x 対応 TTLマクロ (マルチベンダー・柔軟対応版)
-; 概要: 踏み台サーバ経由で各機器へ接続し、情報取得(showコマンド等)を実行
+; Tera Term 4.x 対応 TTLマクロ (マルチベンダー完全自動適応版)
+; 概要: 事前に機器種別が不明な機器群に対しても、踏み台サーバ経由で
+;       自動判定・自動昇格・ページング抑止を行い安全に参照系ログを収集する
+;
 ; 特徴:
-;   - プロトコル未記載時の自動補完 (デフォルト: ssh)
-;   - ユーザ名・パスワード・管理者PWの自動補完 (踏み台情報・通常PWの流用)
-;   - Cisco / Juniper / Yamaha / Linux 等のマルチベンダー対応
-;   - enable不要機器や最初から特権モード(#, $)の自動判別
-;   - enable失敗時も処理を中断せずコマンド実行を継続
-;   - ページング(--More--, 続く 等)の自動検知とスペース送信
+;   1. ログイン前機器不明対応:
+;      SSH/Telnet問わず、認証プロンプト(User/Password)、ホスト鍵確認(yes/no)、
+;      各種バナー(Enter/any key)を自動検知してログイン突破
+;   2. 特権昇格(enable)の自動適応:
+;      - プロンプト(#, $, %, ])から昇格不要機器(Linux/Juniper等)を自動判定
+;      - 一般プロンプト(>)では enable を試行し、Yamaha等の場合は administrator へフォールバック
+;      - 失敗しても通常権限で安全にコマンド実行を継続
+;   3. ページ送り抑止の総当たり:
+;      - 主要ベンダー向けページング解除コマンドを自動送信
+;      - コマンド実行中に --More-- や 続く 等が出た場合も自動でスペース送信
+;   4. コマンドファイルの自動フォールバック:
+;      - CSVでコマンドファイル未指定時は commands_universal.txt を自動適用
+;   5. 安全な多段離脱と実行サマリCSV出力
 ; ========================================================
 
 ; --------------------------------------------------------
-; 1. 踏み台サーバ設定
+; 1. 踏み台サーバおよび全体設定
 ; --------------------------------------------------------
 BASTION_HOST   = '192.168.1.1'      ; 踏み台サーバのIPまたはホスト名
 BASTION_PORT   = '22'               ; 踏み台サーバのSSHポート
@@ -19,11 +28,29 @@ BASTION_USER   = 'bastion_user'     ; 踏み台サーバのログインユーザ
 BASTION_PROMPT = '$'                ; 踏み台サーバのプロンプト記号 ($, # 等)
 
 CSV_FILE       = 'device.csv'       ; 機器リストCSVファイル名
-DEFAULT_PROTO  = 'ssh'              ; プロトコル未指定時のデフォルト
+DEFAULT_CMD    = 'commands_universal.txt' ; コマンド未指定時の汎用ファイル
 
-; 踏み台サーバのパスワード入力
+; 踏み台サーバのパスワード入力ダイアログ
 passwordbox '踏み台サーバのパスワードを入力してください:' '踏み台認証情報'
 BASTION_PASS = inputstr
+
+strlen BASTION_PASS
+if result = 0 then
+    messagebox 'パスワードが入力されなかったため終了します。' '中断'
+    end
+endif
+
+; 実行開始時刻とサマリCSVの準備
+getdate RUN_ID '%Y%m%d_%H%M%S'
+SUMMARY_FILE = 'summary_'
+strconcat SUMMARY_FILE RUN_ID
+strconcat SUMMARY_FILE '.csv'
+
+fileopen f_sum SUMMARY_FILE 0
+if f_sum <> -1 then
+    filewriteln f_sum 'Timestamp,Hostname,IP,Protocol,Prompt,Status,Detail'
+    fileclose f_sum
+endif
 
 ; --------------------------------------------------------
 ; 2. 踏み台サーバへのSSH接続
@@ -43,16 +70,16 @@ if result <> 2 then
     end
 endif
 
-; 踏み台プロンプト待機
 timeout = 30
-wait BASTION_PROMPT
+wait BASTION_PROMPT '$' '#' '>'
 if result = 0 then
     messagebox '踏み台サーバのプロンプト待機がタイムアウトしました。' 'エラー'
+    disconnect 0
     end
 endif
 
 ; --------------------------------------------------------
-; 3. device.csv の読み込み
+; 3. device.csv の読み込みループ
 ; --------------------------------------------------------
 fileopen f_csv CSV_FILE 0
 if f_csv = -1 then
@@ -64,9 +91,8 @@ endif
 
 :read_csv_loop
 filereadln f_csv line
-if result = 1 goto end_csv_loop     ; ファイル末尾(EOF)到達で終了
+if result = 1 goto end_csv_loop     ; ファイル末尾(EOF)到達
 
-; 空行のスキップ
 strlen line
 if result = 0 goto read_csv_loop
 
@@ -75,7 +101,7 @@ strcopy line 1 1 first_char
 strcompare first_char '#'
 if result = 0 goto read_csv_loop
 
-; CSVの1行をカンマで分割 (最大7項目)
+; カンマ区切り分解 (7カラム)
 ; groupmatchstr1: ホスト名
 ; groupmatchstr2: IPアドレス
 ; groupmatchstr3: ユーザー名
@@ -92,48 +118,54 @@ DEV_ENPASS = groupmatchstr5
 DEV_PROTO  = groupmatchstr6
 DEV_CMD    = groupmatchstr7
 
-; ヘッダ行（ホスト名等の文字）はスキップ
+; ヘッダ行スキップ
 strcompare DEV_NAME 'ホスト名'
 if result = 0 goto read_csv_loop
 strcompare DEV_NAME 'hostname'
 if result = 0 goto read_csv_loop
 
-; IPアドレスが空の場合は処理できないためスキップ
+; IPアドレス空チェック
 strlen DEV_IP
 if result = 0 goto read_csv_loop
 
-; ホスト名が空の場合はIPアドレスを代替
+; ホスト名未指定時はIPアドレスで代替
 strlen DEV_NAME
 if result = 0 then
     DEV_NAME = DEV_IP
 endif
 
-; --- 柔軟な欠損補完 ---
-; 1) プロトコル未記載時はデフォルト(ssh)を使用
+; --- 欠損値の自動補完 ---
+; 1) プロトコル未記載時は ssh
 strlen DEV_PROTO
 if result = 0 then
-    DEV_PROTO = DEFAULT_PROTO
+    DEV_PROTO = 'ssh'
 endif
 
-; 2) ユーザ名未記載時は踏み台のユーザ名を使用
+; 2) ユーザ名未記載時は踏み台ユーザ名
 strlen DEV_USER
 if result = 0 then
     DEV_USER = BASTION_USER
 endif
 
-; 3) 機器パスワード未記載時は踏み台パスワードを使用
+; 3) 機器パスワード未記載時は踏み台パスワード
 strlen DEV_PASS
 if result = 0 then
     DEV_PASS = BASTION_PASS
 endif
 
-; 4) 管理者パスワード未記載時は通常パスワードを使用
+; 4) 管理者パスワード未記載時は通常パスワード
 strlen DEV_ENPASS
 if result = 0 then
     DEV_ENPASS = DEV_PASS
 endif
 
-; --- ログ取得開始 ---
+; 5) コマンドファイル未指定時は汎用コマンドファイル
+strlen DEV_CMD
+if result = 0 then
+    DEV_CMD = DEFAULT_CMD
+endif
+
+; ログファイル名 (例: RT-01_20261116_093000.log)
 getdate DATE_STR '%Y%m%d_%H%M%S'
 LOG_FILE = DEV_NAME
 strconcat LOG_FILE '_'
@@ -141,16 +173,20 @@ strconcat LOG_FILE DATE_STR
 strconcat LOG_FILE '.log'
 logopen LOG_FILE 0 0
 
+DEV_STATUS = 'NG'
+DEV_DETAIL = 'Unknown'
+FINAL_PROMPT = '?'
+
 ; --------------------------------------------------------
-; 4. プロトコル別に対象機器へ接続 (SSH / Telnet)
+; 4. 踏み台から対象機器へ接続コマンド発行
 ; --------------------------------------------------------
 strcompare DEV_PROTO 'telnet'
 if result = 0 goto do_telnet
 strcompare DEV_PROTO 'TELNET'
 if result = 0 goto do_telnet
 
-; === SSH接続 ===
-SEND_CMD = 'ssh '
+; --- SSH接続コマンド ---
+SEND_CMD = 'ssh -o StrictHostKeyChecking=no '
 strlen DEV_USER
 if result > 0 then
     strconcat SEND_CMD DEV_USER
@@ -158,148 +194,282 @@ if result > 0 then
 endif
 strconcat SEND_CMD DEV_IP
 sendln SEND_CMD
+goto login_negotiate_loop
 
-timeout = 20
-wait 'yes/no' 'password:' 'Password:' 'パスワード:' BASTION_PROMPT
-if result = 1 then
-    sendln 'yes'
-    wait 'password:' 'Password:' 'パスワード:'
-    sendln DEV_PASS
-elseif result = 2 or result = 3 or result = 4 then
-    sendln DEV_PASS
-elseif result = 5 or result = 0 then
-    ; 接続失敗またはタイムアウト
-    goto cleanup_device
-endif
-goto wait_initial_prompt
-
-; === Telnet接続 ===
+; --- Telnet接続コマンド ---
 :do_telnet
 SEND_CMD = 'telnet '
 strconcat SEND_CMD DEV_IP
 sendln SEND_CMD
 
-timeout = 20
-wait 'Username:' 'login:' 'ユーザー名:' 'Password:' 'password:' 'パスワード:' BASTION_PROMPT
-if result >= 1 and result <= 3 then
-    sendln DEV_USER
-    wait 'Password:' 'password:' 'パスワード:'
-    sendln DEV_PASS
-elseif result >= 4 and result <= 6 then
-    sendln DEV_PASS
-elseif result >= 7 or result = 0 then
+; --------------------------------------------------------
+; 5. ログイン交渉ループ (機器種別不明・バナー・多段認証を自動突破)
+; --------------------------------------------------------
+:login_negotiate_loop
+LOGIN_SUCCESS = 0
+INIT_PROMPT_IDX = 0
+
+while 1
+    timeout = 15
+    ; wait 引数は最大10個厳守
+    ; 1:>, 2:#, 3:$, 4:%, 5:], 6:yes/no, 7:ogin:, 8:ser:, 9:assword:, 10:BASTION_PROMPT
+    wait '>' '#' '$' '%' ']' 'yes/no' 'ogin:' 'ser:' 'assword:' BASTION_PROMPT
+    if result >= 1 and result <= 5 then
+        ; ログイン完了！プロンプト到達
+        LOGIN_SUCCESS = 1
+        INIT_PROMPT_IDX = result
+        break
+    elseif result = 6 then
+        ; SSHホスト鍵フィンガープリント確認
+        sendln 'yes'
+    elseif result = 7 or result = 8 then
+        ; ログイン名/ユーザ名要求
+        sendln DEV_USER
+    elseif result = 9 then
+        ; パスワード要求
+        sendln DEV_PASS
+    elseif result = 10 or result = 0 then
+        ; 踏み台に戻ってしまった、またはタイムアウト
+        if result = 0 then
+            ; バナー等の画面待ちの可能性があるため Enter を一度試行
+            sendln ''
+            timeout = 5
+            wait '>' '#' '$' '%' ']' 'assword:' BASTION_PROMPT
+            if result >= 1 and result <= 5 then
+                LOGIN_SUCCESS = 1
+                INIT_PROMPT_IDX = result
+                break
+            elseif result = 6 then
+                sendln DEV_PASS
+            else
+                DEV_DETAIL = 'Login Timeout'
+                goto cleanup_device
+            endif
+        else
+            DEV_DETAIL = 'Login Failed or Rejected'
+            goto cleanup_device
+        endif
+    endif
+endwhile
+
+if LOGIN_SUCCESS = 0 then
+    DEV_DETAIL = 'Login Failed'
     goto cleanup_device
 endif
 
 ; --------------------------------------------------------
-; 5. ログイン後プロンプトの判別と enable 処理
+; 6. 特権モード(管理者昇格)の自動適応
 ; --------------------------------------------------------
-:wait_initial_prompt
-timeout = 20
-; 一般モード(>), 特権/管理者モード(#), Linux一般($), Juniper系(%)
-wait '>' '#' '$' '%'
-if result = 0 then
-    goto cleanup_device
-endif
+; 初期プロンプトがすでに対象特権(#, ], $, %)の場合は昇格処理不要
+if INIT_PROMPT_IDX >= 2 and INIT_PROMPT_IDX <= 5 goto disable_paging
 
-; すでに特権モード(#) や Linux一般($), Juniper(%) の場合は enable 不要で直ちにコマンドへ
-if result = 2 or result = 3 or result = 4 then
-    goto exec_commands
-endif
-
-; --- 一般モード (>) の場合のみ enable を試行 ---
+; 初期プロンプトが一般モード (>) の場合のみ昇格を試行
 sendln 'enable'
 timeout = 5
-; パスワード要求、または既に特権昇格、あるいは enable コマンドが無効(無反応やプロンプト復帰)
-wait 'Password:' 'password:' 'パスワード:' '#' '>'
-if result >= 1 and result <= 3 then
-    ; 管理者パスワード送信
+; 1:assword:, 2:#, 3:], 4:Invalid, 5:Unknown, 6:not found, 7:Error, 8:syntax, 9:>, 10:$
+wait 'assword:' '#' ']' 'Invalid' 'Unknown' 'not found' 'Error' 'syntax' '>' '$'
+
+if result = 1 then
+    ; Cisco等: 管理者パスワード送信
     sendln DEV_ENPASS
-    timeout = 10
-    wait '#' '>'
+    timeout = 5
+    wait '#' ']' '>' '$'
+elseif result >= 4 and result <= 8 then
+    ; enable が拒否された場合（Yamahaルータ等の可能性）
+    sendln 'administrator'
+    timeout = 5
+    wait 'assword:' '#' '>' '$'
+    if result = 1 then
+        sendln DEV_ENPASS
+        timeout = 5
+        wait '#' '>' '$'
+    endif
 endif
+; 昇格に失敗した場合や最初から不要な場合でも、エラー中断せず通常モードで続行
 
 ; --------------------------------------------------------
-; 6. 指定コマンドファイルを行ごとに送信 (ページング自動解消機能付き)
+; 7. ページ送り抑止の総当たり送信 (マルチベンダー対応)
 ; --------------------------------------------------------
-:exec_commands
-strlen DEV_CMD
-if result = 0 goto cleanup_device
+:disable_paging
+timeout = 2
+; Cisco / Allied / Alaxala / Fortinet
+sendln 'terminal length 0'
+wait '#' '>' '$' '%' ']'
 
-fileopen f_cmd DEV_CMD 0
-if f_cmd = -1 goto cleanup_device
+; Juniper
+sendln 'set cli screen-length 0'
+wait '#' '>' '$' '%' ']'
 
-:read_cmd_loop
-filereadln f_cmd cmd_line
-if result = 1 goto end_cmd_loop     ; コマンドファイル末尾到達
+; Huawei
+sendln 'screen-length 0 temporary'
+wait '#' '>' '$' '%' ']'
 
-strlen cmd_line
-if result = 0 goto read_cmd_loop
+; Yamaha
+sendln 'console lines infinity'
+wait '#' '>' '$' '%' ']'
 
-; コマンド送信
-sendln cmd_line
+; WLC
+sendln 'config paging disable'
+wait '#' '>' '$' '%' ']'
 
-; コマンド実行後のプロンプト待ち (ページング対応)
-:wait_cmd_prompt
-timeout = 30
-wait '>' '#' '$' '%' '--More--' '-- 続く --' '---(more' 'More:'
-if result = 0 then
-    ; タイムアウト時は次のコマンドへ進む
-    goto read_cmd_loop
-elseif result >= 1 and result <= 4 then
-    ; プロンプトに戻ったので次の行へ
-    goto read_cmd_loop
+; 最終プロンプト記号の確定
+timeout = 5
+sendln ''
+wait '#' '>' '$' '%' ']'
+if result = 1 then
+    FINAL_PROMPT = '#'
+elseif result = 2 then
+    FINAL_PROMPT = '>'
+elseif result = 3 then
+    FINAL_PROMPT = '$'
+elseif result = 4 then
+    FINAL_PROMPT = '%'
+elseif result = 5 then
+    FINAL_PROMPT = ']'
 else
-    ; ページング表示 (--More-- 等) のためスペースを送信してページ送り
-    send ' '
-    goto wait_cmd_prompt
+    FINAL_PROMPT = '#'
 endif
 
-:end_cmd_loop
+; --------------------------------------------------------
+; 8. コマンドファイルの実行 (ページング自動検知・スペース送信)
+; --------------------------------------------------------
+fileopen f_cmd DEV_CMD 0
+if f_cmd = -1 then
+    DEV_DETAIL = 'Command File Not Found'
+    goto cleanup_device
+endif
+
+CMD_EXEC_OK = 1
+while 1
+    filereadln f_cmd cmd_line
+    if result = 1 break             ; コマンドファイル終了(EOF)
+
+    strlen cmd_line
+    if result = 0 goto next_cmd_line
+
+    ; コメント行(;)スキップ
+    strcopy cmd_line 1 1 c_char
+    strcompare c_char ';'
+    if result = 0 goto next_cmd_line
+    strcompare c_char '#'
+    if result = 0 goto next_cmd_line
+
+    ; ログ内にコマンド見出しを明記
+    HEADER_STR = #13#10'==================== [ '
+    strconcat HEADER_STR cmd_line
+    strconcat HEADER_STR ' ] ===================='#13#10
+    logwrite HEADER_STR
+
+    ; コマンド送信
+    sendln cmd_line
+
+    ; 実行待機ループ (ページャー自動解消)
+    while 1
+        timeout = 30
+        ; wait 最大10引数
+        ; 1:FINAL_PROMPT, 2:--More--, 3:-- More --, 4:---(more, 5:More:, 6:続く, 7:RETURN, 8:any key
+        wait FINAL_PROMPT '--More--' '-- More --' '---(more' 'More:' '続く' 'RETURN' 'any key'
+        if result = 1 then
+            ; コマンド完了
+            break
+        elseif result >= 2 and result <= 6 then
+            ; ページ送り (スペースキー送信)
+            send ' '
+        elseif result >= 7 and result <= 8 then
+            ; 改行要求
+            sendln ''
+        else
+            ; タイムアウト時は次のコマンドへ進む
+            break
+        endif
+    endwhile
+
+    :next_cmd_line
+endwhile
+
 fileclose f_cmd
+DEV_STATUS = 'OK'
+DEV_DETAIL = 'Success'
 
 ; --------------------------------------------------------
-; 7. 対象機器からの安全なログアウト & 踏み台への復帰
+; 9. 安全な多段階ログアウト (踏み台プロンプト復帰)
 ; --------------------------------------------------------
 :cleanup_device
 ; exit 送信
 timeout = 3
 sendln 'exit'
-wait BASTION_PROMPT
-if result > 0 goto device_done
+wait BASTION_PROMPT 'Save' '(y/n)' '[y/n]' '>' '#' '$' ']'
+if result = 1 goto logout_complete
+if result >= 2 and result <= 4 then
+    sendln 'n'
+endif
 
-; 特権モードやサブシェルから抜けるため再度 exit 送信
+; enable やサブモード抜けのため再度 exit
 sendln 'exit'
-wait BASTION_PROMPT
-if result > 0 goto device_done
+timeout = 3
+wait BASTION_PROMPT 'Save' '(y/n)' '[y/n]'
+if result = 1 goto logout_complete
+if result >= 2 and result <= 4 then
+    sendln 'n'
+endif
 
-; Juniper/機器別の quit 送信
+; Juniper / WLC 向けの quit
 sendln 'quit'
+timeout = 3
 wait BASTION_PROMPT
-if result > 0 goto device_done
+if result = 1 goto logout_complete
 
-; それでも戻らない場合は Ctrl+C 送信後に exit
+; 強制切断 (Ctrl+C 送信後に exit、さらに SSH エスケープ ~.)
 send #3
+mpause 200
 sendln 'exit'
+timeout = 3
+wait BASTION_PROMPT
+if result = 1 goto logout_complete
+
+send '~.'
+mpause 500
+sendln ''
 wait BASTION_PROMPT
 
-:device_done
-; ログファイルを閉じる
+:logout_complete
 logclose
-pause 1
 
-; 次の機器の処理へ
+; サマリCSVに結果行を追記
+getdate TS '%Y/%m/%d %H:%M:%S'
+fileopen f_sum SUMMARY_FILE 1
+if f_sum <> -1 then
+    SUM_LINE = TS
+    strconcat SUM_LINE ','
+    strconcat SUM_LINE DEV_NAME
+    strconcat SUM_LINE ','
+    strconcat SUM_LINE DEV_IP
+    strconcat SUM_LINE ','
+    strconcat SUM_LINE DEV_PROTO
+    strconcat SUM_LINE ','
+    strconcat SUM_LINE FINAL_PROMPT
+    strconcat SUM_LINE ','
+    strconcat SUM_LINE DEV_STATUS
+    strconcat SUM_LINE ','
+    strconcat SUM_LINE DEV_DETAIL
+    filewriteln f_sum SUM_LINE
+    fileclose f_sum
+endif
+
+pause 1
 goto read_csv_loop
 
 ; --------------------------------------------------------
-; 8. 全機器終了処理
+; 10. 全機器終了処理
 ; --------------------------------------------------------
 :end_csv_loop
 fileclose f_csv
 
-; 踏み台サーバからログアウト・Tera Term 切断
+; 踏み台サーバからログアウト
 sendln 'exit'
 disconnect 0
 
-messagebox '全ての機器に対する情報取得とログ保存が完了しました。' '完了'
+MSG = 'すべての機器のログ収集が完了しました。'#13#10'結果サマリ: '
+strconcat MSG SUMMARY_FILE
+messagebox MSG '完了'
 end
