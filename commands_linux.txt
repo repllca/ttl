@@ -1,0 +1,4 @@
+uname -a
+df -h
+free -m
+cat /etc/os-release

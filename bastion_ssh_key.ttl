@@ -1,0 +1,46 @@
+; ========================================================
+; Tera Term 4.x 対応 TTLマクロ（鍵認証版）
+; 概要: 踏み台サーバへの公開鍵認証によるSSH接続
+; ========================================================
+
+; --- 接続先・鍵設定 ---
+BASTION_HOST = '192.168.1.1'
+BASTION_PORT = '22'
+BASTION_USER = 'bastion_user'
+KEY_FILE     = 'C:\path\to\id_rsa'  ; 秘密鍵ファイルのパス
+
+; --- パスフレーズ入力（鍵にパスフレーズがある場合） ---
+passwordbox '秘密鍵のパスフレーズを入力してください（ない場合は空欄）:' '認証情報'
+PASSPHRASE = inputstr
+
+; --- 接続コマンド組み立て ---
+COMMAND = BASTION_HOST
+strconcat COMMAND ':'
+strconcat COMMAND BASTION_PORT
+strconcat COMMAND ' /ssh /2'
+strconcat COMMAND ' /auth=publickey'
+strconcat COMMAND ' /user='
+strconcat COMMAND BASTION_USER
+strconcat COMMAND ' /keyfile="'
+strconcat COMMAND KEY_FILE
+strconcat COMMAND '"'
+strconcat COMMAND ' /passwd='
+strconcat COMMAND PASSPHRASE
+
+; 接続実行
+connect COMMAND
+
+if result <> 2 then
+    messagebox '踏み台サーバへの接続に失敗しました。' 'エラー'
+    end
+endif
+
+; プロンプト待機
+timeout = 30
+wait '$' '#' '%' '>'
+if result = 0 then
+    messagebox 'プロンプト待機がタイムアウトしました。' 'エラー'
+    end
+endif
+
+end

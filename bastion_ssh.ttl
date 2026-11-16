@@ -1,0 +1,90 @@
+; ========================================================
+; Tera Term 4.x 対応 TTLマクロ
+; 概要: 踏み台サーバへのSSH接続および目的サーバへの多段SSH接続
+; ========================================================
+
+; --------------------------------------------------------
+; 1. 接続先情報の設定（環境に合わせて書き換えてください）
+; --------------------------------------------------------
+BASTION_HOST = '192.168.1.1'       ; 踏み台サーバのIPまたはホスト名
+BASTION_PORT = '22'                ; 踏み台サーバのポート
+BASTION_USER = 'bastion_user'      ; 踏み台サーバのユーザー名
+
+TARGET_HOST  = '10.0.0.1'          ; 目的サーバのIPまたはホスト名
+TARGET_USER  = 'target_user'       ; 目的サーバのユーザー名
+
+; --------------------------------------------------------
+; 2. 認証情報の入力（パスワードを平文で保存しない安全な方法）
+; --------------------------------------------------------
+passwordbox '踏み台サーバのパスワードを入力してください:' '踏み台認証'
+BASTION_PASS = inputstr
+
+passwordbox '目的サーバのパスワードを入力してください:' '目的サーバ認証'
+TARGET_PASS = inputstr
+
+; --------------------------------------------------------
+; 3. 踏み台サーバへの接続処理
+; --------------------------------------------------------
+COMMAND = BASTION_HOST
+strconcat COMMAND ':'
+strconcat COMMAND BASTION_PORT
+strconcat COMMAND ' /ssh /2'
+strconcat COMMAND ' /auth=password'
+strconcat COMMAND ' /user='
+strconcat COMMAND BASTION_USER
+strconcat COMMAND ' /passwd='
+strconcat COMMAND BASTION_PASS
+
+; Tera Term の connect コマンドを実行
+connect COMMAND
+
+; 接続成否チェック (result: 2=接続成功, 0/1=失敗またはキャンセル)
+if result <> 2 then
+    messagebox '踏み台サーバへの接続に失敗しました。' 'エラー'
+    end
+endif
+
+; 踏み台のシェルプロンプト待ち (一般ユーザー: $, root: # 等)
+timeout = 30
+wait '$' '#' '%' '>'
+if result = 0 then
+    messagebox '踏み台サーバのプロンプト待機がタイムアウトしました。' 'エラー'
+    end
+endif
+
+; --------------------------------------------------------
+; 4. 目的サーバへの多段SSH接続 (必要に応じて有効化)
+; --------------------------------------------------------
+SSH_CMD = 'ssh '
+strconcat SSH_CMD TARGET_USER
+strconcat SSH_CMD '@'
+strconcat SSH_CMD TARGET_HOST
+sendln SSH_CMD
+
+; 初回接続のフィンガープリント確認 (Are you sure you want to continue connecting (yes/no)?) への対応
+timeout = 10
+wait 'yes/no' 'password:' 'Password:'
+if result = 1 then
+    sendln 'yes'
+    wait 'password:' 'Password:'
+endif
+
+; 目的サーバのパスワード送信
+sendln TARGET_PASS
+
+; 目的サーバのシェルプロンプト待ち
+timeout = 30
+wait '$' '#' '%' '>'
+if result = 0 then
+    messagebox '目的サーバのログインに失敗したか、タイムアウトしました。' 'エラー'
+    end
+endif
+
+; --------------------------------------------------------
+; 5. ログ取得の自動開始（必要に応じてコメント解除）
+; --------------------------------------------------------
+; getdate LOG_FILE 'teraterm_%Y%m%d_%H%M%S.log'
+; logopen LOG_FILE 0 0
+
+messagebox '接続が完了しました。' '完了'
+end
