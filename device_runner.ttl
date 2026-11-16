@@ -29,6 +29,38 @@ BASTION_PROMPT = '$'                ; 踏み台サーバのプロンプト記号
 
 CSV_FILE       = 'device.csv'       ; 機器リストCSVファイル名
 DEFAULT_CMD    = 'commands_universal.txt' ; コマンド未指定時の汎用ファイル
+DEF_LOG_DIR    = 'logs'             ; ログ保存先ディレクトリの初期値
+
+; ログ保存先ディレクトリの入力・確認ダイアログ
+inputbox 'ログ保存先ディレクトリのパスを入力してください:' 'ログ保存先設定' DEF_LOG_DIR
+LOG_DIR = inputstr
+
+strlen LOG_DIR
+if result = 0 then
+    LOG_DIR = DEF_LOG_DIR
+endif
+
+; 末尾のスラッシュやバックスラッシュを除去して正規化
+strlen LOG_DIR
+DIR_LEN = result
+strcopy LOG_DIR DIR_LEN 1 LAST_CHAR
+strcompare LAST_CHAR '\'
+if result = 0 then
+    strcopy LOG_DIR 1 DIR_LEN - 1 LOG_DIR
+endif
+strcompare LAST_CHAR '/'
+if result = 0 then
+    strcopy LOG_DIR 1 DIR_LEN - 1 LOG_DIR
+endif
+
+; Windows環境でディレクトリが存在しない場合に備えて自動作成
+MKDIR_CMD = 'cmd.exe /c if not exist "'
+strconcat MKDIR_CMD LOG_DIR
+strconcat MKDIR_CMD '" mkdir "'
+strconcat MKDIR_CMD LOG_DIR
+strconcat MKDIR_CMD '"'
+exec MKDIR_CMD 'hide'
+mpause 300
 
 ; 踏み台サーバのパスワード入力ダイアログ
 passwordbox '踏み台サーバのパスワードを入力してください:' '踏み台認証情報'
@@ -42,7 +74,8 @@ endif
 
 ; 実行開始時刻とサマリCSVの準備
 getdate RUN_ID '%Y%m%d_%H%M%S'
-SUMMARY_FILE = 'summary_'
+SUMMARY_FILE = LOG_DIR
+strconcat SUMMARY_FILE '\summary_'
 strconcat SUMMARY_FILE RUN_ID
 strconcat SUMMARY_FILE '.csv'
 
@@ -165,9 +198,11 @@ if result = 0 then
     DEV_CMD = DEFAULT_CMD
 endif
 
-; ログファイル名 (例: RT-01_20261116_093000.log)
+; ログファイル名 (例: logs\RT-01_20261116_093000.log)
 getdate DATE_STR '%Y%m%d_%H%M%S'
-LOG_FILE = DEV_NAME
+LOG_FILE = LOG_DIR
+strconcat LOG_FILE '\'
+strconcat LOG_FILE DEV_NAME
 strconcat LOG_FILE '_'
 strconcat LOG_FILE DATE_STR
 strconcat LOG_FILE '.log'

@@ -74,8 +74,9 @@ SW-LEGACY-01,192.168.10.5,admin,Pass1234,,telnet,commands_cisco.txt
 
 1. `device_runner.ttl` の冒頭にある踏み台サーバ情報（`BASTION_HOST`、`BASTION_USER` 等）を確認・編集します。
 2. Tera Term を起動し、メニューの **[コントロール] > [マクロ]** から `device_runner.ttl` を選択します。
-3. 踏み台サーバのパスワード入力ダイアログが表示されるので入力して実行します。
-4. 処理完了後、機器ごとの生ログファイル（`ホスト名_YYYYMMDD_HHMMSS.log`）およびサマリ一覧（`summary_YYYYMMDD_HHMMSS.csv`）が出力されます。
+3. **ログ保存先ディレクトリの指定ダイアログ**が表示されます（デフォルトは `logs`。任意のフルパスや相対パスを指定可能。存在しない場合は自動作成されます）。
+4. 踏み台サーバのパスワード入力ダイアログが表示されるので入力して実行します。
+5. 処理完了後、指定したディレクトリ内に機器ごとの生ログファイル（`ホスト名_YYYYMMDD_HHMMSS.log`）およびサマリ一覧（`summary_YYYYMMDD_HHMMSS.csv`）が出力されます。
 
 ---
 

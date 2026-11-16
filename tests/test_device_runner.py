@@ -17,7 +17,7 @@ VALID_TTL_COMMANDS = {
     "strsplit", "strconcat", "strcopy", "strcompare", "strlen", "getdate",
     "logopen", "logwrite", "logclose", "pause", "mpause", "timeout", "end", "goto",
     "if", "then", "else", "elseif", "endif", "while", "endwhile", "break", "continue",
-    "closett", "call", "return"
+    "closett", "call", "return", "exec"
 }
 
 class TestTTLSyntax(unittest.TestCase):
@@ -188,6 +188,17 @@ class TestDeviceCSVAndFallbackLogic(unittest.TestCase):
         self.assertEqual(row["enpass"], "bpass")
         self.assertEqual(row["cmd_file"], "commands_universal.txt")
         self.assertTrue(os.path.exists(os.path.join(WORKSPACE_DIR, row["cmd_file"])))
+
+    def test_log_directory_path_normalization(self):
+        """Verify that trailing slashes/backslashes are stripped when constructing log paths."""
+        def normalize_dir(d):
+            if d.endswith("\\") or d.endswith("/"):
+                return d[:-1]
+            return d
+
+        self.assertEqual(normalize_dir("C:\\work\\logs\\"), "C:\\work\\logs")
+        self.assertEqual(normalize_dir("logs/"), "logs")
+        self.assertEqual(normalize_dir("logs"), "logs")
 
 
 class TestMultiVendorAdaptiveLogic(unittest.TestCase):
