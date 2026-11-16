@@ -1,0 +1,73 @@
+name: CI Validation
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  linux-validation:
+    name: Linux Unit & E2E Mock Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run TTL Syntax and E2E Tests
+        run: |
+          python -m unittest discover -s tests -v
+
+      - name: Upload Logs Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: execution-logs-linux
+          path: logs/
+          if-no-files-found: ignore
+
+  windows-validation:
+    name: Windows Real Tera Term & E2E Validation
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run Unit & E2E Simulation on Windows
+        run: |
+          python -m unittest discover -s tests -v
+
+      - name: Install Tera Term via Chocolatey
+        run: |
+          choco install teraterm -y --no-progress
+
+      - name: Verify ttpmacro.exe binary presence
+        shell: pwsh
+        run: |
+          $ttpPath = "C:\Program Files (x86)\teraterm\ttpmacro.exe"
+          if (Test-Path $ttpPath) {
+            Write-Host "Tera Term ttpmacro.exe successfully detected at $ttpPath"
+            Get-Item $ttpPath | Select-Object Name, Length, VersionInfo | Format-List
+          } else {
+            Write-Error "ttpmacro.exe not found at $ttpPath"
+            exit 1
+          }
+
+      - name: Upload Windows Logs Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: execution-logs-windows
+          path: logs/
+          if-no-files-found: ignore

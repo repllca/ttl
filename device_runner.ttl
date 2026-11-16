@@ -22,13 +22,29 @@ CSV_FILE       = 'device.csv'       ; 機器リストCSVファイル名
 DEFAULT_CMD    = 'commands_universal.txt' ; コマンド未指定時の汎用ファイル
 DEF_LOG_DIR    = 'logs'             ; ログ保存先ディレクトリの初期値
 
-; ログ保存先ディレクトリの入力ダイアログ
-inputbox 'ログ保存先ディレクトリのパスを入力してください:' 'ログ保存先設定' DEF_LOG_DIR
-LOG_DIR = inputstr
+; 引数判定 (paramcnt >= 3 の場合は自動テスト/非対話モードとしてポップアップをバイパス)
+if paramcnt >= 3 then
+    LOG_DIR = param2
+    BASTION_PASS = param3
+else
+    ; ログ保存先ディレクトリの入力ダイアログ
+    inputbox 'ログ保存先ディレクトリのパスを入力してください:' 'ログ保存先設定' DEF_LOG_DIR
+    LOG_DIR = inputstr
 
-strlen LOG_DIR
-if result = 0 then
-    LOG_DIR = DEF_LOG_DIR
+    strlen LOG_DIR
+    if result = 0 then
+        LOG_DIR = DEF_LOG_DIR
+    endif
+
+    ; 踏み台サーバのパスワード入力ダイアログ
+    passwordbox '踏み台サーバのパスワードを入力してください:' '踏み台認証情報'
+    BASTION_PASS = inputstr
+
+    strlen BASTION_PASS
+    if result = 0 then
+        messagebox 'パスワードが入力されなかったため終了します。' '中断'
+        end
+    endif
 endif
 
 ; 末尾のスラッシュやバックスラッシュを除去してパスを正規化
@@ -50,16 +66,6 @@ endif
 sprintf 'cmd.exe /c if not exist "%s" mkdir "%s"' LOG_DIR LOG_DIR
 exec inputstr 'hide'
 mpause 300
-
-; 踏み台サーバのパスワード入力ダイアログ
-passwordbox '踏み台サーバのパスワードを入力してください:' '踏み台認証情報'
-BASTION_PASS = inputstr
-
-strlen BASTION_PASS
-if result = 0 then
-    messagebox 'パスワードが入力されなかったため終了します。' '中断'
-    end
-endif
 
 ; 実行開始時刻とサマリCSVの準備
 getdate RUN_ID '%Y%m%d_%H%M%S'
@@ -468,8 +474,11 @@ fileclose f_csv
 sendln 'exit'
 disconnect 0
 
-sprintf 'すべての機器のログ収集が完了しました。\n結果サマリ: %s' SUMMARY_FILE
-messagebox inputstr '完了'
+; 手動実行時のみ完了ポップアップを表示 (自動実行時はサイレント終了)
+if paramcnt < 3 then
+    sprintf 'すべての機器のログ収集が完了しました。\n結果サマリ: %s' SUMMARY_FILE
+    messagebox inputstr '完了'
+endif
 end
 
 

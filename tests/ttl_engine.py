@@ -31,14 +31,19 @@ def strip_ttl_comment(line):
     return line.strip()
 
 class TTLEngine:
-    def __init__(self, workspace_dir, mock_session):
+    def __init__(self, workspace_dir, mock_session, params=None):
         self.workspace_dir = workspace_dir
         self.mock_session = mock_session
+        self.params = params or ["device_runner.ttl", "logs", "mock_pass"]
         self.vars = {
             "result": 0,
             "inputstr": "",
-            "timeout": 10
+            "timeout": 10,
+            "paramcnt": len(self.params)
         }
+        for i, p in enumerate(self.params, start=1):
+            if i <= 9:
+                self.vars[f"param{i}"] = p
         self.labels = {}
         self.call_stack = []
         self.open_files = {}
