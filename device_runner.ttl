@@ -1,22 +1,13 @@
 ; ========================================================
-; Tera Term 4.x 対応 TTLマクロ (マルチベンダー完全自動適応版)
+; Tera Term 4.0x系 完全互換 TTLマクロ (マルチベンダー完全自動適応版)
 ; 概要: 事前に機器種別が不明な機器群に対しても、踏み台サーバ経由で
 ;       自動判定・自動昇格・ページング抑止を行い安全に参照系ログを収集する
 ;
-; 特徴:
-;   1. ログイン前機器不明対応:
-;      SSH/Telnet問わず、認証プロンプト(User/Password)、ホスト鍵確認(yes/no)、
-;      各種バナー(Enter/any key)を自動検知してログイン突破
-;   2. 特権昇格(enable)の自動適応:
-;      - プロンプト(#, $, %, ])から昇格不要機器(Linux/Juniper等)を自動判定
-;      - 一般プロンプト(>)では enable を試行し、Yamaha等の場合は administrator へフォールバック
-;      - 失敗しても通常権限で安全にコマンド実行を継続
-;   3. ページ送り抑止の総当たり:
-;      - 主要ベンダー向けページング解除コマンドを自動送信
-;      - コマンド実行中に --More-- や 続く 等が出た場合も自動でスペース送信
-;   4. コマンドファイルの自動フォールバック:
-;      - CSVでコマンドファイル未指定時は commands_universal.txt を自動適用
-;   5. 安全な多段離脱と実行サマリCSV出力
+; 互換性保証 (Tera Term 4.02 / 4.0x対応):
+;   - strsplit (4.67+), break (4.53+), continue (4.77+), sprintf2 (4.62+) 等の
+;     新設コマンドを一切使用せず、strscan/strcopy/goto/call による厳密互換設計
+;   - すべての wait コマンド引数を最大10個以内に厳守
+;   - ログ保存先ディレクトリ指定 & 自動フォルダ作成 (mkdir)
 ; ========================================================
 
 ; --------------------------------------------------------
@@ -31,7 +22,7 @@ CSV_FILE       = 'device.csv'       ; 機器リストCSVファイル名
 DEFAULT_CMD    = 'commands_universal.txt' ; コマンド未指定時の汎用ファイル
 DEF_LOG_DIR    = 'logs'             ; ログ保存先ディレクトリの初期値
 
-; ログ保存先ディレクトリの入力・確認ダイアログ
+; ログ保存先ディレクトリの入力ダイアログ
 inputbox 'ログ保存先ディレクトリのパスを入力してください:' 'ログ保存先設定' DEF_LOG_DIR
 LOG_DIR = inputstr
 
@@ -40,26 +31,24 @@ if result = 0 then
     LOG_DIR = DEF_LOG_DIR
 endif
 
-; 末尾のスラッシュやバックスラッシュを除去して正規化
+; 末尾のスラッシュやバックスラッシュを除去してパスを正規化
 strlen LOG_DIR
 DIR_LEN = result
 strcopy LOG_DIR DIR_LEN 1 LAST_CHAR
 strcompare LAST_CHAR '\'
 if result = 0 then
-    strcopy LOG_DIR 1 DIR_LEN - 1 LOG_DIR
+    CUT_LEN = DIR_LEN - 1
+    strcopy LOG_DIR 1 CUT_LEN LOG_DIR
 endif
 strcompare LAST_CHAR '/'
 if result = 0 then
-    strcopy LOG_DIR 1 DIR_LEN - 1 LOG_DIR
+    CUT_LEN = DIR_LEN - 1
+    strcopy LOG_DIR 1 CUT_LEN LOG_DIR
 endif
 
 ; Windows環境でディレクトリが存在しない場合に備えて自動作成
-MKDIR_CMD = 'cmd.exe /c if not exist "'
-strconcat MKDIR_CMD LOG_DIR
-strconcat MKDIR_CMD '" mkdir "'
-strconcat MKDIR_CMD LOG_DIR
-strconcat MKDIR_CMD '"'
-exec MKDIR_CMD 'hide'
+sprintf 'cmd.exe /c if not exist "%s" mkdir "%s"' LOG_DIR LOG_DIR
+exec inputstr 'hide'
 mpause 300
 
 ; 踏み台サーバのパスワード入力ダイアログ
@@ -86,17 +75,10 @@ if f_sum <> -1 then
 endif
 
 ; --------------------------------------------------------
-; 2. 踏み台サーバへのSSH接続
+; 2. 踏み台サーバへのSSH接続 (4.0x互換構文)
 ; --------------------------------------------------------
-COMMAND = BASTION_HOST
-strconcat COMMAND ':'
-strconcat COMMAND BASTION_PORT
-strconcat COMMAND ' /ssh /2 /auth=password /user='
-strconcat COMMAND BASTION_USER
-strconcat COMMAND ' /passwd='
-strconcat COMMAND BASTION_PASS
-
-connect COMMAND
+sprintf '%s:%s /ssh /2 /auth=password /user=%s /passwd=%s' BASTION_HOST BASTION_PORT BASTION_USER BASTION_PASS
+connect inputstr
 
 if result <> 2 then
     messagebox '踏み台サーバへの接続に失敗しました。' 'エラー'
@@ -114,7 +96,7 @@ endif
 ; --------------------------------------------------------
 ; 3. device.csv の読み込みループ
 ; --------------------------------------------------------
-fileopen f_csv CSV_FILE 0
+fileopen f_csv CSV_FILE 0 1
 if f_csv = -1 then
     messagebox 'device.csv を開くことができませんでした。' 'エラー'
     sendln 'exit'
@@ -134,22 +116,8 @@ strcopy line 1 1 first_char
 strcompare first_char '#'
 if result = 0 goto read_csv_loop
 
-; カンマ区切り分解 (7カラム)
-; groupmatchstr1: ホスト名
-; groupmatchstr2: IPアドレス
-; groupmatchstr3: ユーザー名
-; groupmatchstr4: パスワード
-; groupmatchstr5: 管理者パスワード (enable等)
-; groupmatchstr6: プロトコル (ssh / telnet)
-; groupmatchstr7: コマンドファイルパス
-strsplit line ',' 7
-DEV_NAME   = groupmatchstr1
-DEV_IP     = groupmatchstr2
-DEV_USER   = groupmatchstr3
-DEV_PASS   = groupmatchstr4
-DEV_ENPASS = groupmatchstr5
-DEV_PROTO  = groupmatchstr6
-DEV_CMD    = groupmatchstr7
+; 4.0x互換CSVパーサーサブルーチン呼び出し (strsplit不使用)
+call parse_csv_line
 
 ; ヘッダ行スキップ
 strcompare DEV_NAME 'ホスト名'
@@ -220,7 +188,7 @@ if result = 0 goto do_telnet
 strcompare DEV_PROTO 'TELNET'
 if result = 0 goto do_telnet
 
-; --- SSH接続コマンド ---
+; === SSH接続コマンド ===
 SEND_CMD = 'ssh -o StrictHostKeyChecking=no '
 strlen DEV_USER
 if result > 0 then
@@ -231,7 +199,7 @@ strconcat SEND_CMD DEV_IP
 sendln SEND_CMD
 goto login_negotiate_loop
 
-; --- Telnet接続コマンド ---
+; === Telnet接続コマンド ===
 :do_telnet
 SEND_CMD = 'telnet '
 strconcat SEND_CMD DEV_IP
@@ -244,49 +212,62 @@ sendln SEND_CMD
 LOGIN_SUCCESS = 0
 INIT_PROMPT_IDX = 0
 
-while 1
-    timeout = 15
-    ; wait 引数は最大10個厳守
-    ; 1:>, 2:#, 3:$, 4:%, 5:], 6:yes/no, 7:ogin:, 8:ser:, 9:assword:, 10:BASTION_PROMPT
-    wait '>' '#' '$' '%' ']' 'yes/no' 'ogin:' 'ser:' 'assword:' BASTION_PROMPT
+:login_retry_loop
+timeout = 15
+; wait 引数は最大10個厳守
+; 1:>, 2:#, 3:$, 4:%, 5:], 6:yes/no, 7:ogin:, 8:ser:, 9:assword:, 10:BASTION_PROMPT
+wait '>' '#' '$' '%' ']' 'yes/no' 'ogin:' 'ser:' 'assword:' BASTION_PROMPT
+
+if result >= 1 and result <= 5 then
+    ; ログイン完了！プロンプト到達
+    LOGIN_SUCCESS = 1
+    INIT_PROMPT_IDX = result
+    goto login_success_exit
+endif
+
+if result = 6 then
+    ; SSHホスト鍵フィンガープリント確認
+    sendln 'yes'
+    goto login_retry_loop
+endif
+
+if result = 7 or result = 8 then
+    ; ログイン名/ユーザ名要求
+    sendln DEV_USER
+    goto login_retry_loop
+endif
+
+if result = 9 then
+    ; パスワード要求
+    sendln DEV_PASS
+    goto login_retry_loop
+endif
+
+if result = 10 then
+    ; 踏み台に戻ってしまった（接続拒否またはホスト不在）
+    DEV_DETAIL = 'Connection Rejected'
+    goto cleanup_device
+endif
+
+if result = 0 then
+    ; タイムアウト時：バナー等の画面待ちの可能性があるため Enter を一度送信
+    sendln ''
+    timeout = 5
+    wait '>' '#' '$' '%' ']' 'assword:' BASTION_PROMPT
     if result >= 1 and result <= 5 then
-        ; ログイン完了！プロンプト到達
         LOGIN_SUCCESS = 1
         INIT_PROMPT_IDX = result
-        break
-    elseif result = 6 then
-        ; SSHホスト鍵フィンガープリント確認
-        sendln 'yes'
-    elseif result = 7 or result = 8 then
-        ; ログイン名/ユーザ名要求
-        sendln DEV_USER
-    elseif result = 9 then
-        ; パスワード要求
-        sendln DEV_PASS
-    elseif result = 10 or result = 0 then
-        ; 踏み台に戻ってしまった、またはタイムアウト
-        if result = 0 then
-            ; バナー等の画面待ちの可能性があるため Enter を一度試行
-            sendln ''
-            timeout = 5
-            wait '>' '#' '$' '%' ']' 'assword:' BASTION_PROMPT
-            if result >= 1 and result <= 5 then
-                LOGIN_SUCCESS = 1
-                INIT_PROMPT_IDX = result
-                break
-            elseif result = 6 then
-                sendln DEV_PASS
-            else
-                DEV_DETAIL = 'Login Timeout'
-                goto cleanup_device
-            endif
-        else
-            DEV_DETAIL = 'Login Failed or Rejected'
-            goto cleanup_device
-        endif
+        goto login_success_exit
     endif
-endwhile
+    if result = 6 then
+        sendln DEV_PASS
+        goto login_retry_loop
+    endif
+    DEV_DETAIL = 'Login Timeout'
+    goto cleanup_device
+endif
 
+:login_success_exit
 if LOGIN_SUCCESS = 0 then
     DEV_DETAIL = 'Login Failed'
     goto cleanup_device
@@ -368,60 +349,55 @@ endif
 ; --------------------------------------------------------
 ; 8. コマンドファイルの実行 (ページング自動検知・スペース送信)
 ; --------------------------------------------------------
-fileopen f_cmd DEV_CMD 0
+fileopen f_cmd DEV_CMD 0 1
 if f_cmd = -1 then
     DEV_DETAIL = 'Command File Not Found'
     goto cleanup_device
 endif
 
-CMD_EXEC_OK = 1
-while 1
-    filereadln f_cmd cmd_line
-    if result = 1 break             ; コマンドファイル終了(EOF)
+:read_cmd_loop
+filereadln f_cmd cmd_line
+if result = 1 goto end_cmd_loop     ; コマンドファイル終了(EOF)
 
-    strlen cmd_line
-    if result = 0 goto next_cmd_line
+strlen cmd_line
+if result = 0 goto read_cmd_loop
 
-    ; コメント行(;)スキップ
-    strcopy cmd_line 1 1 c_char
-    strcompare c_char ';'
-    if result = 0 goto next_cmd_line
-    strcompare c_char '#'
-    if result = 0 goto next_cmd_line
+; コメント行(;)スキップ
+strcopy cmd_line 1 1 c_char
+strcompare c_char ';'
+if result = 0 goto read_cmd_loop
+strcompare c_char '#'
+if result = 0 goto read_cmd_loop
 
-    ; ログ内にコマンド見出しを明記
-    HEADER_STR = #13#10'==================== [ '
-    strconcat HEADER_STR cmd_line
-    strconcat HEADER_STR ' ] ===================='#13#10
-    logwrite HEADER_STR
+; ログ内にコマンド見出しを明記
+logwrite #13#10
+logwrite '==================== [ '
+logwrite cmd_line
+logwrite ' ] ===================='
+logwrite #13#10
 
-    ; コマンド送信
-    sendln cmd_line
+; コマンド送信
+sendln cmd_line
 
-    ; 実行待機ループ (ページャー自動解消)
-    while 1
-        timeout = 30
-        ; wait 最大10引数
-        ; 1:FINAL_PROMPT, 2:--More--, 3:-- More --, 4:---(more, 5:More:, 6:続く, 7:RETURN, 8:any key
-        wait FINAL_PROMPT '--More--' '-- More --' '---(more' 'More:' '続く' 'RETURN' 'any key'
-        if result = 1 then
-            ; コマンド完了
-            break
-        elseif result >= 2 and result <= 6 then
-            ; ページ送り (スペースキー送信)
-            send ' '
-        elseif result >= 7 and result <= 8 then
-            ; 改行要求
-            sendln ''
-        else
-            ; タイムアウト時は次のコマンドへ進む
-            break
-        endif
-    endwhile
+; 実行待機ループ (ページャー自動解消)
+:wait_cmd_prompt
+timeout = 30
+; wait 最大10引数
+; 1:FINAL_PROMPT, 2:--More--, 3:-- More --, 4:---(more, 5:More:, 6:続く, 7:RETURN, 8:any key
+wait FINAL_PROMPT '--More--' '-- More --' '---(more' 'More:' '続く' 'RETURN' 'any key'
+if result = 1 goto read_cmd_loop
+if result >= 2 and result <= 6 then
+    send ' '
+    goto wait_cmd_prompt
+endif
+if result >= 7 and result <= 8 then
+    sendln ''
+    goto wait_cmd_prompt
+endif
+; タイムアウト時は次のコマンドへ進む
+goto read_cmd_loop
 
-    :next_cmd_line
-endwhile
-
+:end_cmd_loop
 fileclose f_cmd
 DEV_STATUS = 'OK'
 DEV_DETAIL = 'Success'
@@ -474,20 +450,8 @@ logclose
 getdate TS '%Y/%m/%d %H:%M:%S'
 fileopen f_sum SUMMARY_FILE 1
 if f_sum <> -1 then
-    SUM_LINE = TS
-    strconcat SUM_LINE ','
-    strconcat SUM_LINE DEV_NAME
-    strconcat SUM_LINE ','
-    strconcat SUM_LINE DEV_IP
-    strconcat SUM_LINE ','
-    strconcat SUM_LINE DEV_PROTO
-    strconcat SUM_LINE ','
-    strconcat SUM_LINE FINAL_PROMPT
-    strconcat SUM_LINE ','
-    strconcat SUM_LINE DEV_STATUS
-    strconcat SUM_LINE ','
-    strconcat SUM_LINE DEV_DETAIL
-    filewriteln f_sum SUM_LINE
+    sprintf '%s,%s,%s,%s,%s,%s,%s' TS DEV_NAME DEV_IP DEV_PROTO FINAL_PROMPT DEV_STATUS DEV_DETAIL
+    filewriteln f_sum inputstr
     fileclose f_sum
 endif
 
@@ -504,7 +468,123 @@ fileclose f_csv
 sendln 'exit'
 disconnect 0
 
-MSG = 'すべての機器のログ収集が完了しました。'#13#10'結果サマリ: '
-strconcat MSG SUMMARY_FILE
-messagebox MSG '完了'
+sprintf 'すべての機器のログ収集が完了しました。\n結果サマリ: %s' SUMMARY_FILE
+messagebox inputstr '完了'
 end
+
+
+; ========================================================
+; サブルーチン: 4.0x互換 CSV行パーサー (7列対応・strsplit完全代替)
+; ========================================================
+:parse_csv_line
+    COL1 = ''
+    COL2 = ''
+    COL3 = ''
+    COL4 = ''
+    COL5 = ''
+    COL6 = ''
+    COL7 = ''
+    PARSE_STR = line
+
+    ; 1列目 (ホスト名)
+    strscan PARSE_STR ','
+    if result = 0 goto parse_col1_only
+    POS = result
+    COPY_LEN = POS - 1
+    strcopy PARSE_STR 1 COPY_LEN COL1
+    START_POS = POS + 1
+    strlen PARSE_STR
+    REM_LEN = result - POS
+    strcopy PARSE_STR START_POS REM_LEN PARSE_STR
+
+    ; 2列目 (IPアドレス)
+    strscan PARSE_STR ','
+    if result = 0 goto parse_col2_only
+    POS = result
+    COPY_LEN = POS - 1
+    strcopy PARSE_STR 1 COPY_LEN COL2
+    START_POS = POS + 1
+    strlen PARSE_STR
+    REM_LEN = result - POS
+    strcopy PARSE_STR START_POS REM_LEN PARSE_STR
+
+    ; 3列目 (ユーザー名)
+    strscan PARSE_STR ','
+    if result = 0 goto parse_col3_only
+    POS = result
+    COPY_LEN = POS - 1
+    strcopy PARSE_STR 1 COPY_LEN COL3
+    START_POS = POS + 1
+    strlen PARSE_STR
+    REM_LEN = result - POS
+    strcopy PARSE_STR START_POS REM_LEN PARSE_STR
+
+    ; 4列目 (パスワード)
+    strscan PARSE_STR ','
+    if result = 0 goto parse_col4_only
+    POS = result
+    COPY_LEN = POS - 1
+    strcopy PARSE_STR 1 COPY_LEN COL4
+    START_POS = POS + 1
+    strlen PARSE_STR
+    REM_LEN = result - POS
+    strcopy PARSE_STR START_POS REM_LEN PARSE_STR
+
+    ; 5列目 (管理者パスワード)
+    strscan PARSE_STR ','
+    if result = 0 goto parse_col5_only
+    POS = result
+    COPY_LEN = POS - 1
+    strcopy PARSE_STR 1 COPY_LEN COL5
+    START_POS = POS + 1
+    strlen PARSE_STR
+    REM_LEN = result - POS
+    strcopy PARSE_STR START_POS REM_LEN PARSE_STR
+
+    ; 6列目 (プロトコル)
+    strscan PARSE_STR ','
+    if result = 0 goto parse_col6_only
+    POS = result
+    COPY_LEN = POS - 1
+    strcopy PARSE_STR 1 COPY_LEN COL6
+    START_POS = POS + 1
+    strlen PARSE_STR
+    REM_LEN = result - POS
+    strcopy PARSE_STR START_POS REM_LEN PARSE_STR
+
+    ; 7列目 (コマンドファイル)
+    COL7 = PARSE_STR
+    goto parse_assign
+
+    :parse_col1_only
+    COL1 = PARSE_STR
+    goto parse_assign
+
+    :parse_col2_only
+    COL2 = PARSE_STR
+    goto parse_assign
+
+    :parse_col3_only
+    COL3 = PARSE_STR
+    goto parse_assign
+
+    :parse_col4_only
+    COL4 = PARSE_STR
+    goto parse_assign
+
+    :parse_col5_only
+    COL5 = PARSE_STR
+    goto parse_assign
+
+    :parse_col6_only
+    COL6 = PARSE_STR
+
+    :parse_assign
+    DEV_NAME   = COL1
+    DEV_IP     = COL2
+    DEV_USER   = COL3
+    DEV_PASS   = COL4
+    DEV_ENPASS = COL5
+    DEV_PROTO  = COL6
+    DEV_CMD    = COL7
+return

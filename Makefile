@@ -3,11 +3,11 @@
 all: check test
 
 test:
-	@echo "Running tests..."
-	devbox run -- python3 tests/test_device_runner.py
+	@echo "Running unit tests and end-to-end verification..."
+	devbox run -- python3 -m unittest discover -s tests -v
 
 check:
-	@echo "Checking TTL syntax and configuration files..."
+	@echo "Checking Tera Term 4.02 compatibility & syntax..."
 	devbox run -- python3 -m unittest -v tests/test_device_runner.py
 
 build:

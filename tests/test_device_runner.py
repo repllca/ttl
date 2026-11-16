@@ -11,12 +11,12 @@ WORKSPACE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TTL_FILE = os.path.join(WORKSPACE_DIR, "device_runner.ttl")
 CSV_FILE = os.path.join(WORKSPACE_DIR, "device.csv")
 
-VALID_TTL_COMMANDS = {
+VALID_TTL_402_COMMANDS = {
     "connect", "disconnect", "passwordbox", "messagebox", "inputbox", "yesnobox",
     "wait", "waitrecv", "sendln", "send", "fileopen", "filereadln", "filewriteln", "fileclose",
-    "strsplit", "strconcat", "strcopy", "strcompare", "strlen", "getdate",
+    "strconcat", "strcopy", "strcompare", "strlen", "strscan", "sprintf", "getdate",
     "logopen", "logwrite", "logclose", "pause", "mpause", "timeout", "end", "goto",
-    "if", "then", "else", "elseif", "endif", "while", "endwhile", "break", "continue",
+    "if", "then", "else", "elseif", "endif",
     "closett", "call", "return", "exec"
 }
 
@@ -107,8 +107,22 @@ class TestTTLSyntax(unittest.TestCase):
             first_word = line_code.split()[0].lower()
             self.assertIn(
                 first_word,
-                VALID_TTL_COMMANDS,
-                f"Line {line_num}: Unknown TTL command '{first_word}'"
+                VALID_TTL_402_COMMANDS,
+                f"Line {line_num}: Unknown or post-4.02 TTL command '{first_word}'"
+            )
+
+    def test_strictly_no_post_402_commands(self):
+        """Ensure no commands from Tera Term 4.53+ (strsplit, break, continue, sprintf2) exist."""
+        forbidden = {"strsplit", "break", "continue", "sprintf2", "do", "loop", "until"}
+        for line_num, line in enumerate(self.lines, start=1):
+            line_code = line.split(";", 1)[0].strip()
+            if not line_code or line_code.startswith(":"):
+                continue
+            first_word = line_code.split()[0].lower()
+            self.assertNotIn(
+                first_word,
+                forbidden,
+                f"Line {line_num}: Command '{first_word}' is incompatible with Tera Term 4.02!"
             )
 
 
