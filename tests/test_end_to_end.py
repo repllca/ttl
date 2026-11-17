@@ -73,6 +73,33 @@ class TestEndToEndSimulation(unittest.TestCase):
                 log_data = f.read()
             self.assertIn("==================== [", log_data, f"Log file {lf} should contain command headers")
 
+    def test_interactive_dialog_mode(self):
+        """Verify macro execution in interactive mode (popups for CSV, logs, password)."""
+        logs_dir = os.path.join(WORKSPACE_DIR, "logs")
+        if os.path.exists(logs_dir):
+            import shutil
+            shutil.rmtree(logs_dir)
+
+        session = MockSession()
+        # params = [] simulates manual launch without CLI args (triggers inputbox & passwordbox)
+        engine = TTLEngine(WORKSPACE_DIR, session, params=[])
+        engine.load_script(TTL_FILE)
+        engine.run()
+
+        # Check logs directory and summary
+        self.assertTrue(os.path.exists(logs_dir), "logs/ should be created in interactive mode")
+        summary_files = glob.glob(os.path.join(logs_dir, "summary_*.csv"))
+        self.assertGreater(len(summary_files), 0, "summary CSV should be created in interactive mode")
+
+        with open(summary_files[-1], "r", encoding="utf-8") as f:
+            content = f.read()
+
+        lines = [l for l in content.splitlines() if l.strip() and not l.startswith("Timestamp")]
+        self.assertGreaterEqual(len(lines), 5)
+        for line in lines:
+            parts = line.split(",")
+            self.assertEqual(parts[5], "OK", f"Device {parts[1]} failed in interactive mode: {parts[6]}")
+
 
 if __name__ == "__main__":
     unittest.main()
