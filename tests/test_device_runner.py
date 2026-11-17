@@ -13,7 +13,8 @@ CSV_FILE = os.path.join(WORKSPACE_DIR, "device.csv")
 
 VALID_TTL_402_COMMANDS = {
     "connect", "disconnect", "passwordbox", "messagebox", "inputbox", "yesnobox",
-    "wait", "waitrecv", "sendln", "send", "fileopen", "filereadln", "filewriteln", "fileclose",
+    "wait", "waitln", "waitrecv", "flushrecv", "sendln", "send",
+    "fileopen", "filereadln", "filewriteln", "fileclose",
     "strconcat", "strcopy", "strcompare", "strlen", "strscan", "sprintf", "getdate",
     "logopen", "logwrite", "logclose", "pause", "mpause", "timeout", "end", "goto",
     "if", "then", "else", "elseif", "endif",

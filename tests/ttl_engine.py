@@ -80,11 +80,11 @@ class TTLEngine:
                     f"Line {line_num}: Command '{first_word}' was introduced in a newer Tera Term version "
                     f"and is incompatible with Tera Term 4.02!"
                 )
-            # Check wait argument count <= 10
-            if first_word == "wait":
-                args = re.findall(r"'[^']*'|\"[^\"]*\"|\S+", code[5:].strip())
+            # Check wait / waitln argument count <= 10
+            if first_word in ("wait", "waitln"):
+                args = re.findall(r"'[^']*'|\"[^\"]*\"|\S+", code[len(first_word):].strip())
                 if len(args) > 10:
-                    raise SyntaxError(f"Line {line_num}: wait command exceeds 10 arguments limit ({len(args)})")
+                    raise SyntaxError(f"Line {line_num}: {first_word} command exceeds 10 arguments limit ({len(args)})")
 
     def run(self):
         self.verify_strict_402_compatibility()
@@ -171,11 +171,11 @@ class TTLEngine:
             if m:
                 fmt = m.group(1)[1:-1]
                 args_str = m.group(2).strip()
-                args = [self._eval_token(tok) for tok in args_str.split()] if args_str else []
-                # Replace %s with args
+                args = [self._eval_token(tok) for tok in re.findall(r"'[^']*'|\"[^\"]*\"|\S+", args_str)] if args_str else []
+                # Replace %s or %d with args
                 out = fmt
                 for a in args:
-                    out = out.replace("%s", str(a), 1)
+                    out = re.sub(r"%[sd]", lambda _: str(a), out, count=1)
                 self.vars["inputstr"] = out
             self.pc += 1
             return
@@ -183,7 +183,8 @@ class TTLEngine:
         # 7. strscan <strvar> <substr>
         if cmd == "strscan":
             str_var = parts[1]
-            substr = self._eval_token(parts[2])
+            rest = code[len(cmd):].strip()[len(str_var):].strip()
+            substr = str(self._eval_expr(rest))
             s = str(self.vars.get(str_var, ""))
             idx = s.find(substr)
             self.vars["result"] = idx + 1 if idx != -1 else 0
@@ -213,7 +214,8 @@ class TTLEngine:
         # 10. strcompare <strvar> <val>
         if cmd == "strcompare":
             s1 = str(self.vars.get(parts[1], ""))
-            s2 = str(self._eval_token(parts[2]))
+            rest = code[len(cmd):].strip()[len(parts[1]):].strip()
+            s2 = str(self._eval_expr(rest))
             self.vars["result"] = 0 if s1 == s2 else (1 if s1 > s2 else -1)
             self.pc += 1
             return
@@ -221,15 +223,16 @@ class TTLEngine:
         # 11. strconcat <var> <expr>
         if cmd == "strconcat":
             var = parts[1]
-            val = self._eval_token(parts[2])
+            rest = code[len(cmd):].strip()[len(var):].strip()
+            val = self._eval_expr(rest)
             self.vars[var] = str(self.vars.get(var, "")) + str(val)
             self.pc += 1
             return
 
         # 12. inputbox / passwordbox / messagebox
         if cmd in ("inputbox", "passwordbox"):
-            # Default inputstr mock
-            default_val = self._eval_token(parts[3]) if len(parts) > 3 else "mock_pass"
+            tokens = re.findall(r"'[^']*'|\"[^\"]*\"|\S+", code[len(cmd):].strip())
+            default_val = self._eval_token(tokens[2]) if len(tokens) > 2 else "mock_pass"
             self.vars["inputstr"] = default_val
             self.pc += 1
             return
@@ -241,6 +244,7 @@ class TTLEngine:
         # 13. connect <expr>
         if cmd == "connect":
             # Simulate successful connection to bastion (result = 2)
+            self.mock_session.state = "BASTION"
             self.vars["result"] = 2
             self.pc += 1
             return
@@ -273,17 +277,51 @@ class TTLEngine:
             self.pc += 1
             return
 
+        # 15b. flushrecv
+        if cmd == "flushrecv":
+            self.stream_buffer = ""
+            self.pc += 1
+            return
+
         # 16. wait str1 str2 ...
         if cmd == "wait":
-            wait_args = [self._eval_token(tok) for tok in re.findall(r"'[^']*'|\"[^\"]*\"|\S+", code[5:].strip())]
+            wait_args = [str(self._eval_token(tok)) for tok in re.findall(r"'[^']*'|\"[^\"]*\"|\S+", code[5:].strip())]
             matched_idx = 0
-            # Search stream_buffer for matches
+            best_end = None
+            # Match whichever pattern completes earliest in stream_buffer (real Tera Term stream order)
             for idx, pat in enumerate(wait_args, start=1):
-                if pat in self.stream_buffer:
-                    matched_idx = idx
-                    # Clear buffer up to matched pattern
-                    p_pos = self.stream_buffer.find(pat)
-                    self.stream_buffer = self.stream_buffer[p_pos + len(pat):]
+                if not pat:
+                    continue
+                p_pos = self.stream_buffer.find(pat)
+                if p_pos != -1:
+                    end_pos = p_pos + len(pat)
+                    if best_end is None or end_pos < best_end:
+                        best_end = end_pos
+                        matched_idx = idx
+            if matched_idx > 0 and best_end is not None:
+                self.stream_buffer = self.stream_buffer[best_end:]
+            self.vars["result"] = matched_idx
+            self.pc += 1
+            return
+
+        # 16b. waitln str1 str2 ...
+        if cmd == "waitln":
+            wait_args = [str(self._eval_token(tok)) for tok in re.findall(r"'[^']*'|\"[^\"]*\"|\S+", code[7:].strip())]
+            matched_idx = 0
+            lines = self.stream_buffer.splitlines(keepends=True)
+            consumed_len = 0
+            for line in lines:
+                consumed_len += len(line)
+                line_clean = line.rstrip("\r\n")
+                if not line_clean:
+                    continue
+                for idx, pat in enumerate(wait_args, start=1):
+                    if pat and pat in line_clean:
+                        matched_idx = idx
+                        self.vars["inputstr"] = line_clean
+                        break
+                if matched_idx > 0:
+                    self.stream_buffer = self.stream_buffer[consumed_len:]
                     break
             self.vars["result"] = matched_idx
             self.pc += 1
@@ -296,6 +334,9 @@ class TTLEngine:
             text = str(val) + ("\n" if cmd == "sendln" else "")
             response = self.mock_session.receive_input(text)
             self.stream_buffer += response
+            if self.active_log and response:
+                self.active_log.write(response)
+                self.active_log.flush()
             self.pc += 1
             return
 

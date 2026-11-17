@@ -99,6 +99,90 @@ class TestEndToEndSimulation(unittest.TestCase):
         for line in lines:
             parts = line.split(",")
             self.assertEqual(parts[5], "OK", f"Device {parts[1]} failed in interactive mode: {parts[6]}")
+        # Because session started ALREADY_CONNECTED, bastion should still be alive at the end
+        self.assertEqual(session.state, "BASTION", "Existing bastion session must not be disconnected at end")
+
+    def test_unconnected_interactive_dialog_mode(self):
+        """Verify macro execution when launched before connecting to bastion (prompts for Host/User/Pass)."""
+        logs_dir = os.path.join(WORKSPACE_DIR, "logs")
+        if os.path.exists(logs_dir):
+            import shutil
+            shutil.rmtree(logs_dir)
+
+        session = MockSession()
+        session.state = "DISCONNECTED"
+        engine = TTLEngine(WORKSPACE_DIR, session, params=[])
+        engine.load_script(TTL_FILE)
+        engine.run()
+
+        summary_files = glob.glob(os.path.join(logs_dir, "summary_*.csv"))
+        self.assertGreater(len(summary_files), 0)
+        with open(summary_files[-1], "r", encoding="utf-8") as f:
+            content = f.read()
+        lines = [l for l in content.splitlines() if l.strip() and not l.startswith("Timestamp")]
+        self.assertEqual(len(lines), 6)
+        for line in lines:
+            parts = line.split(",")
+            self.assertEqual(parts[5], "OK")
+
+    def test_failure_resilience_and_bastion_survival(self):
+        """
+        Verify that when devices fail (unreachable IP, wrong password, SSH algorithm mismatch),
+        the macro NEVER mistakes the bastion prompt for the device prompt, NEVER disconnects the
+        bastion session, and successfully processes subsequent valid devices.
+        """
+        import tempfile
+        logs_dir = os.path.join(WORKSPACE_DIR, "logs")
+        if os.path.exists(logs_dir):
+            import shutil
+            shutil.rmtree(logs_dir)
+
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", dir=WORKSPACE_DIR, delete=False, encoding="utf-8") as tf:
+            tf.write(
+                "# ホスト名,IPアドレス,ユーザー名,パスワード,管理者パスワード,プロトコル,コマンドファイル\n"
+                "UNREACHABLE-01, 192.168.10.254 , admin , Pass1234 , , ssh , commands_cisco.txt\n"
+                "WRONG-PASS-01, 192.168.10.1 , admin , WRONG_PASS , , ssh , commands_cisco.txt\n"
+                "OLD-SSH-KEX-01, 192.168.10.253 , admin , Pass1234 , , ssh , commands_cisco.txt\n"
+                "\"VALID-LINUX-01\", \"192.168.10.3\" , user1 , Pass1234 , , ssh , commands_linux.txt\n"
+            )
+            temp_csv = tf.name
+
+        try:
+            session = MockSession()
+            engine = TTLEngine(
+                WORKSPACE_DIR,
+                session,
+                params=["device_runner.ttl", "logs", "mock_pass", temp_csv]
+            )
+            engine.load_script(TTL_FILE)
+            engine.run()
+
+            summary_files = glob.glob(os.path.join(logs_dir, "summary_*.csv"))
+            self.assertGreater(len(summary_files), 0)
+            with open(summary_files[-1], "r", encoding="utf-8") as f:
+                content = f.read()
+
+            lines = [l for l in content.splitlines() if l.strip() and not l.startswith("Timestamp")]
+            self.assertEqual(len(lines), 4, f"All 4 rows must be processed without bastion drop! Got: {lines}")
+
+            results = {}
+            for line in lines:
+                parts = line.split(",")
+                results[parts[1]] = (parts[5], parts[6])
+
+            self.assertEqual(results["UNREACHABLE-01"][0], "NG")
+            self.assertIn("Unreachable", results["UNREACHABLE-01"][1])
+
+            self.assertEqual(results["WRONG-PASS-01"][0], "NG")
+            self.assertIn("Auth Failed", results["WRONG-PASS-01"][1])
+
+            self.assertEqual(results["OLD-SSH-KEX-01"][0], "NG")
+            self.assertIn("SSH Algorithm Mismatch", results["OLD-SSH-KEX-01"][1])
+
+            self.assertEqual(results["VALID-LINUX-01"], ("OK", "Success"))
+        finally:
+            if os.path.exists(temp_csv):
+                os.remove(temp_csv)
 
 
 if __name__ == "__main__":

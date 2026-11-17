@@ -1,45 +1,51 @@
 ; ==============================================================================
-; Tera Term 4.0x系 完全互換 TTLマクロ (マルチベンダー自動ログ収集マクロ)
+; Tera Term 4.0x系 完全互換 TTLマクロ (マルチベンダー自動ログ収集・高信頼版)
 ; ==============================================================================
 ;
 ; 【このマクロの概要】
-;   1. 踏み台サーバ（Linux等）にSSH接続します。
+;   1. 踏み台サーバ（Linux等）へSSH接続します（既に接続済みのウィンドウからの実行も自動判別）。
 ;   2. CSVファイル（device.csv等）から機器一覧（IPアドレス・認証情報等）を1行ずつ読み込みます。
-;   3. 踏み台サーバを経由して各対象機器（Cisco, Yamaha, Juniper, Linux, Telnet等）へSSH/Telnet接続します。
-;   4. 機種に応じたログイン・特権昇格（enable/administrator）・ページャー無効化を自動判別して行います。
-;   5. コマンド定義ファイル（commands_*.txt）の内容を順次投入し、個別ログファイルに記録します。
-;   6. 実行結果のサマリ（成功/失敗/プロンプト等）をCSV（summary_YYYYMMDD_HHMMSS.csv）に出力します。
+;   3. 踏み台サーバを経由して各対象機器（Cisco, Yamaha, Juniper, Linux, Telnet等）へ接続します。
+;   4. 機種に応じたログイン・特権昇格（enable/administrator）・ページャー無効化を自動判別します。
+;   5. 機器固有のプロンプト文字列（例: RT-CISCO-01#）を自動取得し、出力途中の '#' や '>' による
+;      誤判定（コマンド暴走）を完全に防止します。
+;   6. コマンド定義ファイル（commands_*.txt）の内容を順次投入し、個別ログに記録します。
+;   7. 相手機器からの離脱時、踏み台復帰マーカー（__BASTION_RETURN__）によって踏み台シェルへの
+;      誤った 'exit' 送信（踏み台の巻き添え切断）を100%防止します。
+;   8. 実行結果のサマリ（成功/失敗/詳細理由）をCSV（summary_YYYYMMDD_HHMMSS.csv）に出力します。
 ;
-; 【Tera Term 4.02 互換性保証】
-;   - 新しいバージョン（4.53+）で追加されたコマンド（strsplit, break, continue, sprintf2,
-;     filenamebox, dirnamebox 等）を一切使用せず、古いTera Term 4.02でもそのまま動作します。
-;   - すべての wait コマンドの引数を「最大10個」以内に厳格制限しています。
+; 【Tera Term 4.02 厳格互換性保証】
+;   - 新しいバージョン（4.53+）専用のコマンド（strsplit, break, continue, sprintf2,
+;     filenamebox, dirnamebox 等）を一切使用せず、Tera Term 4.02 でも確実に動作します。
+;   - すべての wait / waitln コマンドの引数を「最大10個」以内に厳格制限しています。
+;   - logopen 直後の result 未更新仕様（4.02固有）に対応しています。
 ;
 ; ------------------------------------------------------------------------------
 ; 【プログラムの目次】
 ;   1. 基準ディレクトリの設定 (相対パスのズレを完全防止)
-;   2. ★【ユーザー設定エリア】 (環境に合わせてここを書き換えてください)
-;   3. ★【対話ポップアップ】 (CSVファイル、ログ保存先、パスワードの選択・入力)
+;   2. ★【ユーザー設定エリア】 (環境に合わせて初期値を変更できます)
+;   3. ★【対話ポップアップ】 (踏み台接続情報・CSVファイル・ログ保存先の選択)
 ;   4. ログ保存先フォルダ作成 & サマリCSVの準備
-;   5. 踏み台サーバへのSSH接続
+;   5. 踏み台サーバへのSSH接続 (未接続時のみ接続・既接続時はそのまま利用)
 ;   6. CSVファイルの順次読み込みループ
-;   7. 踏み台から対象機器への接続コマンド発行 (SSH / Telnet)
-;   8. ログイン交渉ループ (プロンプト検知・バナー処理・パスワード自動入力)
+;   7. 踏み台から対象機器への接続コマンド発行 (SSH / Telnet + 復帰マーカー付与)
+;   8. 2段階ログイン交渉ループ (バナー誤検知防止・パスワード誤り即検知)
 ;   9. 特権モード(管理者昇格)の自動適応 (Cisco enable / Yamaha administrator)
-;  10. ページ送り抑止コマンドの送信 (terminal length 0 等)
+;  10. ページ送り抑止コマンド送信 & 機器プロンプト文字列の自動取得
 ;  11. クリーンログ取得開始 (logopen)
-;  12. コマンドファイルの順次実行 (ページャー自動検知・スペース送信)
-;  13. 対象機器からの安全切断 (踏み台セッション保護)
+;  12. コマンドファイルの順次実行 (ページャー自動検知・途中切断検知)
+;  13. 対象機器からの安全切断 (復帰マーカーによる踏み台セッション完全保護)
 ;  14. サマリCSVへの結果書き込み
-;  15. 全機器終了処理 & 踏み台ログアウト
-;  サブルーチン: CSV行パーサー (カンマ区切り解析)
+;  15. 全機器終了処理 & 成功/失敗件数サマリ通知
+;  サブルーチン1: CSV行パーサー (カンマ区切り解析 & 前後空白除去)
+;  サブルーチン2: 文字列前後トリム処理 (空白・タブ・改行・クォート除去)
 ; ==============================================================================
 
 
 ; ==============================================================================
 ; 1. 基準ディレクトリの設定 (相対パス解決)
 ; ==============================================================================
-; Tera Term起動時のカレントディレクトリが「C:\Program Files (x86)\teraterm」等に
+; Tera Term起動時の作業フォルダが「C:\Program Files (x86)\teraterm」等に
 ; なっている場合でも、このマクロと同じフォルダを基準に動作するよう固定します。
 getdir BASE_DIR
 setdir BASE_DIR
@@ -47,19 +53,25 @@ setdir BASE_DIR
 
 ; ==============================================================================
 ; 2. ★【ユーザー設定エリア】
-;    ご利用の環境に合わせて、必要に応じて以下の値を変更してください。
+;    ご利用の環境に合わせて、以下の初期値を自由に変更してください。
+;    （※そのままでも起動時のポップアップ画面で変更・入力が可能です）
 ; ==============================================================================
 
-; --- 踏み台サーバの接続設定 ---
+; --- 踏み台サーバの接続設定（ポップアップの初期値になります） ---
 BASTION_HOST   = '192.168.1.1'      ; 踏み台サーバのIPアドレスまたはホスト名
 BASTION_PORT   = '22'               ; 踏み台サーバのSSHポート番号 (通常は 22)
 BASTION_USER   = 'bastion_user'     ; 踏み台サーバのログインユーザ名
 BASTION_PROMPT = '$'                ; 踏み台サーバのシェルプロンプト記号 ($, #, % 等)
 
+; --- 古い機器向けのSSH追加オプション ---
+; 【変更のポイント】古いCiscoやスイッチ等で「no matching key exchange method found」等の
+; エラーが出る場合は、下のコメントアウト(;)を外して有効化してください。
+SSH_EXTRA_OPTS = '-o ConnectTimeout=10'
+; SSH_EXTRA_OPTS = '-o ConnectTimeout=10 -o KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1 -o HostKeyAlgorithms=+ssh-rsa'
+
 ; --- デフォルトのファイル・フォルダ名 ---
-; （ポップアップが出たときに初期値として入力欄にあらかじめ入る名前です）
-DEF_CSV_NAME   = 'device.csv'       ; 読み込む機器一覧CSVファイル名
-DEF_LOG_NAME   = 'logs'             ; ログを保存するフォルダ名
+DEF_CSV_NAME   = 'device.csv'             ; 読み込む機器一覧CSVファイル名
+DEF_LOG_NAME   = 'logs'                   ; ログを保存するフォルダ名
 DEF_CMD_NAME   = 'commands_universal.txt' ; CSV側でコマンド未指定時の汎用コマンドファイル
 
 ; --- タイムアウト設定 (単位: 秒) ---
@@ -68,7 +80,7 @@ CMD_TIMEOUT    = 30                 ; 各コマンドの実行結果を待つ最
 
 
 ; ==============================================================================
-; 3. ★【対話ポップアップ】(ファイル・フォルダ・パスワードの選択と入力)
+; 3. ★【対話ポップアップ】(接続先・ファイル・フォルダの選択と入力)
 ; ==============================================================================
 
 ; 共通パスの初期値を組み立て
@@ -81,11 +93,19 @@ DEF_LOG_PATH = inputstr
 sprintf '%s\%s' BASE_DIR DEF_CMD_NAME
 DEFAULT_CMD = inputstr
 
+; すでにTera Termウィンドウで踏み台サーバに接続済みかどうかを確認
+; (result = 2 の場合は、手動で踏み台にログインした状態からマクロが実行されたと判断)
+ALREADY_CONNECTED = 0
+testlink
+if result = 2 then
+    ALREADY_CONNECTED = 1
+endif
+
 ; コマンドライン引数の有無をチェック
 ; 引数なし(通常実行): ポップアップダイアログを表示して対話的に選択
 ; 引数あり(自動テスト/CI): ポップアップを省略して自動実行
 if paramcnt >= 3 then
-    ; 自動テストモード (引数から受け取り)
+    ALREADY_CONNECTED = 0
     LOG_DIR = param2
     BASTION_PASS = param3
     if paramcnt >= 4 then
@@ -95,14 +115,48 @@ if paramcnt >= 3 then
     endif
 else
     ; ----------------------------------------------------
-    ; ポップアップ①: 機器一覧CSVファイルの選択
+    ; 踏み台に未接続の場合のみ、踏み台の接続先情報をポップアップで確認
     ; ----------------------------------------------------
-    ; 初期値としてマクロ配置フォルダの device.csv が入っています。
-    ; そのまま「OK」を押すか、別のCSVファイル名・フルパスを入力できます。
+    if ALREADY_CONNECTED = 0 then
+        ; ポップアップ①: 踏み台サーバのIP / ホスト名
+        inputbox '踏み台サーバのIPアドレス（またはホスト名）を入力してください:' '① 踏み台サーバ接続先' BASTION_HOST
+        BASTION_HOST = inputstr
+        strlen BASTION_HOST
+        if result = 0 then
+            messagebox '踏み台サーバの接続先が入力されなかったため、処理を中断します。' '中断'
+            end
+        endif
+
+        ; ポップアップ②: 踏み台サーバのログインユーザー名
+        inputbox '踏み台サーバのログインユーザー名を入力してください:' '② 踏み台ユーザー名' BASTION_USER
+        BASTION_USER = inputstr
+        strlen BASTION_USER
+        if result = 0 then
+            messagebox '踏み台サーバのユーザー名が入力されなかったため、処理を中断します。' '中断'
+            end
+        endif
+
+        ; ポップアップ③: 踏み台サーバのログインパスワード
+        sprintf '踏み台サーバ [%s@%s] のパスワードを入力してください:' BASTION_USER BASTION_HOST
+        passwordbox inputstr '③ 踏み台パスワード'
+        BASTION_PASS = inputstr
+        strlen BASTION_PASS
+        if result = 0 then
+            messagebox 'パスワードが入力されなかったため、処理を中断します。' '中断'
+            end
+        endif
+    else
+        ; すでに踏み台に接続済みの場合は、CSV内でパスワード省略時に使う共通パスワードのみ確認
+        passwordbox '現在接続中の踏み台セッションをそのまま使用します。\nCSVでパスワード省略時に使う共通パスワードを入力してください（不要なら空欄のままOK）:' '共通パスワード確認（省略可）'
+        BASTION_PASS = inputstr
+    endif
+
+    ; ----------------------------------------------------
+    ; ポップアップ④: 機器一覧CSVファイルの選択
+    ; ----------------------------------------------------
     inputbox '読み込む機器一覧CSVファイル名（またはフルパス）を入力してください:' '機器一覧CSVの選択' DEF_CSV_PATH
     CSV_FILE = inputstr
 
-    ; 空欄でOKされた場合は初期値を使用
     strlen CSV_FILE
     if result = 0 then
         CSV_FILE = DEF_CSV_PATH
@@ -125,20 +179,17 @@ else
     fileopen f_chk CSV_FILE 0 1
     if f_chk = -1 then
         sprintf '指定された機器一覧CSVファイルが見つかりません:\n%s\n\nファイル名や配置場所をご確認ください。' CSV_FILE
-        messagebox inputstr 'エラー: ファイル不存在'
+        messagebox inputstr 'エラー: CSVファイル不存在'
         end
     endif
     fileclose f_chk
 
     ; ----------------------------------------------------
-    ; ポップアップ②: ログ保存先フォルダの指定
+    ; ポップアップ⑤: ログ保存先フォルダの指定
     ; ----------------------------------------------------
-    ; 初期値としてマクロ配置フォルダ内の logs フォルダが入っています。
-    ; 存在しないフォルダ名を入力した場合でも、マクロが自動作成します。
     inputbox 'ログ保存先フォルダのパスを入力してください（存在しない場合は自動作成されます）:' 'ログ保存先フォルダ設定' DEF_LOG_PATH
     LOG_DIR = inputstr
 
-    ; 空欄でOKされた場合は初期値を使用
     strlen LOG_DIR
     if result = 0 then
         LOG_DIR = DEF_LOG_PATH
@@ -155,19 +206,6 @@ else
                 LOG_DIR = inputstr
             endif
         endif
-    endif
-
-    ; ----------------------------------------------------
-    ; ポップアップ③: 踏み台サーバのログインパスワード入力
-    ; ----------------------------------------------------
-    sprintf '踏み台サーバ [%s@%s] のパスワードを入力してください:' BASTION_USER BASTION_HOST
-    passwordbox inputstr '踏み台認証情報'
-    BASTION_PASS = inputstr
-
-    strlen BASTION_PASS
-    if result = 0 then
-        messagebox 'パスワードが入力されなかったため、処理を中断します。' '中断'
-        end
     endif
 endif
 
@@ -220,45 +258,73 @@ fileclose f_sum
 ; ==============================================================================
 ; 5. 踏み台サーバへのSSH接続
 ; ==============================================================================
-; Tera Term 4.0x 完全互換の connect コマンド文字列を組み立て
-sprintf '%s:%s /ssh /2 /auth=password /user=%s /passwd=%s' BASTION_HOST BASTION_PORT BASTION_USER BASTION_PASS
-connect inputstr
+if ALREADY_CONNECTED = 0 then
+    ; BASTION_HOST にポート番号(:22等)が含まれているか確認
+    strscan BASTION_HOST ':'
+    if result = 0 then
+        sprintf '%s:%s /ssh /2 /auth=password /user=%s /passwd=%s' BASTION_HOST BASTION_PORT BASTION_USER BASTION_PASS
+    else
+        sprintf '%s /ssh /2 /auth=password /user=%s /passwd=%s' BASTION_HOST BASTION_USER BASTION_PASS
+    endif
+    connect inputstr
 
-; connect コマンドの戻り値判定 (2 = 接続成功)
-if result <> 2 then
-    messagebox '踏み台サーバへのSSH接続に失敗しました。IP・ポート・認証情報を確認してください。' 'エラー'
-    end
+    ; connect コマンドの戻り値判定 (2 = 接続成功)
+    if result <> 2 then
+        sprintf '踏み台サーバ (%s) へのSSH接続に失敗しました。\n\n【確認項目】:\n1. 踏み台サーバのIPアドレス(%s)とポート番号(%s)が正しいか\n2. ユーザー名(%s)とパスワードが正しいか\n3. PCから踏み台サーバへネットワークが繋がっているか' BASTION_HOST BASTION_HOST BASTION_PORT BASTION_USER
+        messagebox inputstr '踏み台SSH接続エラー'
+        end
+    endif
+
+    ; 踏み台サーバのログインプロンプト待機
+    timeout = 30
+    wait BASTION_PROMPT '$' '#' '>' '%' ']'
+    if result = 0 then
+        sprintf '踏み台サーバへの接続後、プロンプト待機がタイムアウトしました。\n\n【確認項目】:\n1. パスワードが間違っていないか（画面上で再入力待ちになっていないか）\n2. 踏み台サーバのログインバナー等でEnter待ちになっていないか'
+        messagebox inputstr 'プロンプト待機タイムアウト'
+        disconnect 0
+        end
+    endif
+
+    ; 踏み台サーバの実際のプロンプト記号を自動認識して更新
+    if result = 2 then
+        BASTION_PROMPT = '$'
+    elseif result = 3 then
+        BASTION_PROMPT = '#'
+    elseif result = 4 then
+        BASTION_PROMPT = '>'
+    elseif result = 5 then
+        BASTION_PROMPT = '%'
+    elseif result = 6 then
+        BASTION_PROMPT = ']'
+    endif
+else
+    ; すでに接続済みの場合はEnterを1回送って現在のプロンプトを確認
+    flushrecv
+    sendln ''
+    timeout = 10
+    wait BASTION_PROMPT '$' '#' '>' '%' ']'
+    if result = 2 then
+        BASTION_PROMPT = '$'
+    elseif result = 3 then
+        BASTION_PROMPT = '#'
+    elseif result = 4 then
+        BASTION_PROMPT = '>'
+    elseif result = 5 then
+        BASTION_PROMPT = '%'
+    elseif result = 6 then
+        BASTION_PROMPT = ']'
+    endif
 endif
 
-; 踏み台サーバのログインプロンプト待機
-timeout = 30
-wait BASTION_PROMPT '$' '#' '>' '%' ']'
-if result = 0 then
-    sprintf '踏み台サーバへの接続後、プロンプト待機がタイムアウトしました。\n\n【確認項目】:\n1. BASTION_PROMPT（現在: "%s"）がサーバ側と合っているか\n2. 踏み台サーバのログインバナー等でEnter待ちになっていないか' BASTION_PROMPT
-    messagebox inputstr 'プロンプト待機タイムアウト'
-    disconnect 0
-    end
-endif
-
-; 踏み台サーバの実際のプロンプト記号を自動認識して更新（$ と # の不一致を自動防止）
-if result = 2 then
-    BASTION_PROMPT = '$'
-elseif result = 3 then
-    BASTION_PROMPT = '#'
-elseif result = 4 then
-    BASTION_PROMPT = '>'
-elseif result = 5 then
-    BASTION_PROMPT = '%'
-elseif result = 6 then
-    BASTION_PROMPT = ']'
-endif
-
-; 初期状態の機器情報をセット
+; 初期状態の機器情報・集計カウンタをセット
 DEV_NAME = '(1台目の接続前)'
 DEV_IP = '未接続'
 DEV_PROTO = '-'
 DEV_STATUS = '未実行'
 DEV_DETAIL = '-'
+TOTAL_COUNT = 0
+OK_COUNT = 0
+NG_COUNT = 0
 
 
 ; ==============================================================================
@@ -267,8 +333,10 @@ DEV_DETAIL = '-'
 fileopen f_csv CSV_FILE 0 1
 if f_csv = -1 then
     messagebox 'CSVファイルを開くことができませんでした。' 'エラー'
-    sendln 'exit'
-    disconnect 0
+    if ALREADY_CONNECTED = 0 then
+        sendln 'exit'
+        disconnect 0
+    endif
     end
 endif
 
@@ -281,19 +349,12 @@ if result <> 2 then
     sprintf '■ 発生箇所:\n  直前に処理していた機器: %s (IP: %s)\n  プロトコル: %s / ステータス: %s (%s)\n\n' DEV_NAME DEV_IP DEV_PROTO DEV_STATUS DEV_DETAIL
     strconcat ERROR_MSG inputstr
     strconcat ERROR_MSG '--------------------------------------------------\n'
-    strconcat ERROR_MSG '【何を修正・確認すべきかのチェックリスト】\n\n'
-    strconcat ERROR_MSG '1. 踏み台プロンプト記号の設定 (最重要)\n'
-    sprintf '   現在 device_runner.ttl の設定は BASTION_PROMPT = "%s" です。\n' BASTION_PROMPT
+    strconcat ERROR_MSG '【確認・対処いただきたいポイント】\n\n'
+    strconcat ERROR_MSG '1. 対象機器のIPアドレス・稼働状態の確認\n'
+    sprintf '   %s (%s) が実在し、踏み台から接続可能か確認してください。\n\n' DEV_NAME DEV_IP
     strconcat ERROR_MSG inputstr
-    strconcat ERROR_MSG '   実際の踏み台シェルの末尾記号（通常は $ または #）と一致\n'
-    strconcat ERROR_MSG '   しているか確認してください。root利用時は # に変更が必要です。\n\n'
-    strconcat ERROR_MSG '2. 対象機器への手動接続確認\n'
-    sprintf '   踏み台サーバから手動で「%s %s」を実行し、\n' DEV_PROTO DEV_IP
-    strconcat ERROR_MSG inputstr
-    strconcat ERROR_MSG '   踏み台から相手機器へ通信が届くか確認してください。\n\n'
-    strconcat ERROR_MSG '3. 踏み台サーバのアイドルタイムアウト (TMOUT)\n'
-    strconcat ERROR_MSG '   踏み台側の環境変数 TMOUT や SSH設定で短時間切断されていないか\n'
-    strconcat ERROR_MSG '   ご確認ください。\n'
+    strconcat ERROR_MSG '2. 踏み台サーバ側のタイムアウト設定 (TMOUT)\n'
+    strconcat ERROR_MSG '   踏み台側の環境変数 TMOUT 等で自動切断されていないかご確認ください。\n'
     strconcat ERROR_MSG '--------------------------------------------------\n'
     sprintf '※切断前までの結果は以下に保存されています:\n%s' SUMMARY_FILE
     strconcat ERROR_MSG inputstr
@@ -307,15 +368,22 @@ endif
 filereadln f_csv line
 if result = 1 goto end_csv_loop     ; ファイル終端(EOF)に達したら終了
 
+; 行の前後の空白・改行をトリム
+TRIM_VAL = line
+call trim_string
+line = TRIM_VAL
+
 strlen line
 if result = 0 goto read_csv_loop    ; 空行はスキップ
 
-; コメント行(# で始まる行)はスキップ
+; コメント行(# または ; で始まる行)はスキップ
 strcopy line 1 1 first_char
 strcompare first_char '#'
 if result = 0 goto read_csv_loop
+strcompare first_char ';'
+if result = 0 goto read_csv_loop
 
-; CSV行パーサーサブルーチンを呼び出して各列に分解
+; CSV行パーサーサブルーチンを呼び出して各列に分解（各列の前後空白も自動除去）
 call parse_csv_line
 
 ; CSVのタイトル行(ホスト名, IP等のヘッダ)はスキップ
@@ -323,10 +391,15 @@ strcompare DEV_NAME 'ホスト名'
 if result = 0 goto read_csv_loop
 strcompare DEV_NAME 'hostname'
 if result = 0 goto read_csv_loop
+strcompare DEV_NAME 'Hostname'
+if result = 0 goto read_csv_loop
 
 ; IPアドレスが未入力の行はスキップ
 strlen DEV_IP
 if result = 0 goto read_csv_loop
+
+; 処理対象台数をカウントアップ
+TOTAL_COUNT = TOTAL_COUNT + 1
 
 ; --- CSV内の空欄（欠損値）に対する自動フォールバック補完 ---
 ; 1) ホスト名未指定時: IPアドレスで代替
@@ -382,27 +455,38 @@ endif
 DEV_STATUS = 'NG'
 DEV_DETAIL = 'Unknown'
 FINAL_PROMPT = '?'
+PROMPT_SYMBOL = '?'
 IS_LOG_OPEN = 0
 IS_DEVICE_LOGGED_IN = 0
 
 
 ; ==============================================================================
-; 7. 踏み台から対象機器への接続コマンド発行 (SSH / Telnet)
+; 7. 踏み台から対象機器への接続コマンド発行 (SSH / Telnet + 踏み台復帰マーカー)
 ; ==============================================================================
+; 【重要設計】
+;   コマンド末尾に `; echo "__BAS""TION_RETURN__"` を付与して実行します。
+;   これにより、接続失敗時やログアウト時にSSH/Telnetが終了して踏み台に戻った瞬間、
+;   必ず `__BASTION_RETURN__` が出力され、踏み台と対象機器を100%確実に区別できます。
+; ==============================================================================
+
+; 接続前に受信バッファの残存データを完全クリア
+flushrecv
+
 strcompare DEV_PROTO 'telnet'
 if result = 0 goto do_telnet
 strcompare DEV_PROTO 'TELNET'
 if result = 0 goto do_telnet
 
 ; --- SSH接続コマンド発行 ---
-; （フィンガープリント警告や known_hosts 競合による停止を防ぐオプションを付与）
-SEND_CMD = 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null '
+sprintf 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null %s ' SSH_EXTRA_OPTS
+SEND_CMD = inputstr
 strlen DEV_USER
 if result > 0 then
     strconcat SEND_CMD DEV_USER
     strconcat SEND_CMD '@'
 endif
 strconcat SEND_CMD DEV_IP
+strconcat SEND_CMD ' ; echo "__BAS""TION_RETURN__"'
 sendln SEND_CMD
 goto login_negotiate_loop
 
@@ -410,59 +494,75 @@ goto login_negotiate_loop
 :do_telnet
 SEND_CMD = 'telnet '
 strconcat SEND_CMD DEV_IP
+strconcat SEND_CMD ' ; echo "__BAS""TION_RETURN__"'
 sendln SEND_CMD
 
 
 ; ==============================================================================
-; 8. ログイン交渉ループ (プロンプト検知・バナー処理・パスワード自動入力)
+; 8. 2段階ログイン交渉ループ (バナー誤検知防止・パスワード誤り即検知)
 ; ==============================================================================
 :login_negotiate_loop
 LOGIN_SUCCESS = 0
 INIT_PROMPT_IDX = 0
 
-:login_retry_loop
+; ------------------------------------------------------
+; 【第1段階】パスワード送信前の待機
+;   ログイン前バナーに含まれる '#' や '>' や ']' をプロンプトと誤認しないよう、
+;   ここでは認証要求（yes/no, login:, Password:）または接続失敗マーカーのみを待ちます。
+; ------------------------------------------------------
+:login_stage1_loop
 timeout = LOGIN_TIMEOUT
-; Tera Term 4.02の仕様制限: waitコマンドの引数は最大10個厳守
-; 引数1:>, 2:#, 3:$, 4:%, 5:], 6:yes/no, 7:ogin:, 8:ser:, 9:assword:, 10:BASTION_PROMPT
-wait '>' '#' '$' '%' ']' 'yes/no' 'ogin:' 'ser:' 'assword:' BASTION_PROMPT
+; wait引数(9個):
+; 1:yes/no, 2:ogin:, 3:ser:, 4:assword:, 5:__BASTION_RETURN__,
+; 6:no matching, 7:Unable to negotiate, 8:refused, 9:unreachable
+wait 'yes/no' 'ogin:' 'ser:' 'assword:' '__BASTION_RETURN__' 'no matching' 'Unable to negotiate' 'refused' 'unreachable'
 
-if result >= 1 and result <= 5 then
-    ; ログイン完了！機器のプロンプトに到達
-    LOGIN_SUCCESS = 1
-    INIT_PROMPT_IDX = result
-    IS_DEVICE_LOGGED_IN = 1
-    goto login_success_exit
-endif
-
-if result = 6 then
-    ; 初回SSH接続時のフィンガープリント確認 (Are you sure you want to continue connecting (yes/no)?)
+if result = 1 then
+    ; 初回SSH接続時のフィンガープリント確認 (yes/no)
     sendln 'yes'
-    goto login_retry_loop
+    goto login_stage1_loop
 endif
 
-if result = 7 or result = 8 then
-    ; ユーザー名入力要求 (login: / username: 等)
+if result = 2 or result = 3 then
+    ; ユーザー名入力要求 (login: / Username:)
     sendln DEV_USER
-    goto login_retry_loop
+    goto login_stage1_loop
 endif
 
-if result = 9 then
-    ; パスワード入力要求 (Password: 等)
+if result = 4 then
+    ; パスワード入力要求 (Password:) -> パスワードを送信して【第2段階】へ進む
     sendln DEV_PASS
-    goto login_retry_loop
+    goto login_stage2_wait
 endif
 
-if result = 10 then
-    ; 踏み台プロンプトに戻ってしまった（相手機器のIPが存在しないか、ポートが閉じている）
-    DEV_DETAIL = 'Connection Rejected / Host Unreachable'
+if result = 5 then
+    ; SSH/Telnetが即座に終了して踏み台に戻った（接続拒否・ホスト不在・名前解決失敗等）
+    DEV_DETAIL = 'Connection Failed / Unreachable'
+    goto record_result
+endif
+
+if result = 6 or result = 7 then
+    ; 古い機器でSSH鍵交換アルゴリズム等が不一致の場合
+    timeout = 5
+    wait '__BASTION_RETURN__'
+    DEV_DETAIL = 'SSH Algorithm Mismatch (Check SSH_EXTRA_OPTS)'
+    goto record_result
+endif
+
+if result = 8 or result = 9 then
+    ; Connection refused / Network is unreachable
+    timeout = 5
+    wait '__BASTION_RETURN__'
+    DEV_DETAIL = 'Connection Refused / Unreachable'
     goto record_result
 endif
 
 if result = 0 then
-    ; タイムアウト時：MOTDバナー等でキー入力待ちの可能性があるため、Enterを1度送信
+    ; タイムアウト時: 公開鍵認証等でパスワードなしログイン済みか、バナーでEnter待ちの可能性
     sendln ''
     timeout = 5
-    wait '>' '#' '$' '%' ']' 'assword:' BASTION_PROMPT
+    ; 1:>, 2:#, 3:$, 4:%, 5:], 6:assword:, 7:__BASTION_RETURN__
+    wait '>' '#' '$' '%' ']' 'assword:' '__BASTION_RETURN__'
     if result >= 1 and result <= 5 then
         LOGIN_SUCCESS = 1
         INIT_PROMPT_IDX = result
@@ -471,16 +571,88 @@ if result = 0 then
     endif
     if result = 6 then
         sendln DEV_PASS
-        goto login_retry_loop
+        goto login_stage2_wait
+    endif
+    if result = 7 then
+        DEV_DETAIL = 'Connection Timed Out'
+        goto record_result
     endif
 
-    ; 接続失敗時: まだ相手機器に入っていないため、Ctrl+C (#3) で安全に踏み台シェルへ復帰
-    ; （※ここで exit を送ると踏み台からログアウトしてしまうため絶対に送らない）
+    ; 応答がないため Ctrl+C (#3) で接続試行を中断し、踏み台へ安全に復帰
     send #3
     mpause 300
-    sendln ''
-    wait BASTION_PROMPT '$' '#'
+    sendln 'echo "__BAS""TION_RETURN__"'
+    timeout = 5
+    wait '__BASTION_RETURN__'
     DEV_DETAIL = 'Login Timeout'
+    goto record_result
+endif
+
+; ------------------------------------------------------
+; 【第2段階】パスワード送信後のプロンプト待機
+;   パスワード送信後にもう一度 Password: や login: や denied が返ってきた場合は、
+;   「パスワード誤り」と即座に判定して中断します（アカウントロック＆無限ループ防止）。
+; ------------------------------------------------------
+:login_stage2_wait
+timeout = LOGIN_TIMEOUT
+; wait引数(10個):
+; 1:>, 2:#, 3:$, 4:%, 5:], 6:assword:, 7:ogin:, 8:ser:, 9:__BASTION_RETURN__, 10:denied
+wait '>' '#' '$' '%' ']' 'assword:' 'ogin:' 'ser:' '__BASTION_RETURN__' 'denied'
+
+if result >= 1 and result <= 5 then
+    ; ログイン成功！対象機器のプロンプトに到達
+    LOGIN_SUCCESS = 1
+    INIT_PROMPT_IDX = result
+    IS_DEVICE_LOGGED_IN = 1
+    goto login_success_exit
+endif
+
+if result >= 6 and result <= 8 then
+    ; パスワード送信後に再度パスワード/ログイン要求が出た＝パスワード誤り
+    send #3
+    mpause 300
+    sendln 'echo "__BAS""TION_RETURN__"'
+    timeout = 5
+    wait '__BASTION_RETURN__'
+    DEV_DETAIL = 'Auth Failed (Wrong Password)'
+    goto record_result
+endif
+
+if result = 9 then
+    ; パスワード送信直後に切断されて踏み台へ戻った
+    DEV_DETAIL = 'Auth Rejected / Closed by Host'
+    goto record_result
+endif
+
+if result = 10 then
+    ; Permission denied / Access denied
+    send #3
+    mpause 300
+    sendln 'echo "__BAS""TION_RETURN__"'
+    timeout = 5
+    wait '__BASTION_RETURN__'
+    DEV_DETAIL = 'Auth Failed (Permission Denied)'
+    goto record_result
+endif
+
+if result = 0 then
+    ; パスワード送信後にタイムアウトした場合、Enterを1回送って再確認
+    sendln ''
+    timeout = 5
+    wait '>' '#' '$' '%' ']' '__BASTION_RETURN__'
+    if result >= 1 and result <= 5 then
+        LOGIN_SUCCESS = 1
+        INIT_PROMPT_IDX = result
+        IS_DEVICE_LOGGED_IN = 1
+        goto login_success_exit
+    endif
+
+    send #3
+    mpause 300
+    sendln 'echo "__BAS""TION_RETURN__"'
+    timeout = 5
+    wait '__BASTION_RETURN__'
+    DEV_DETAIL = 'Post-Auth Timeout'
     goto record_result
 endif
 
@@ -522,9 +694,9 @@ endif
 
 
 ; ==============================================================================
-; 10. ページ送り抑止コマンドの送信 (マルチベンダー自動適応)
+; 10. ページ送り抑止コマンド送信 & 機器プロンプト文字列の自動取得
 ; ==============================================================================
-; 【変更のポイント】もし新しい機種に対応させたい場合は、ここにコマンドを追加してください。
+; 【変更のポイント】新しい機種に対応させたい場合は、ここにページング無効化コマンドを追加できます。
 :disable_paging
 timeout = 2
 
@@ -548,23 +720,49 @@ wait '#' '>' '$' '%' ']'
 sendln 'config paging disable'
 wait '#' '>' '$' '%' ']'
 
-; コマンド完了判定に使う最終プロンプト記号を確定
-timeout = 5
+; ------------------------------------------------------
+; 【プロンプト文字列の精密取得】
+;   単なる1文字（'#' や '>'）だけを待つと、コマンド出力内の '#101-Ubuntu' や
+;   '<LOOPBACK>' に反応してコマンドが暴走してしまいます。
+;   そのため、空改行を送って機器固有のプロンプト行全体（例: 'RT-CISCO-01#'）を取得します。
+; ------------------------------------------------------
+mpause 200
+flushrecv
 sendln ''
-wait '#' '>' '$' '%' ']'
+mpause 200
+sendln ''
+timeout = 5
+waitln '#' '>' '$' '%' ']'
 if result = 1 then
-    FINAL_PROMPT = '#'
+    PROMPT_SYMBOL = '#'
 elseif result = 2 then
-    FINAL_PROMPT = '>'
+    PROMPT_SYMBOL = '>'
 elseif result = 3 then
-    FINAL_PROMPT = '$'
+    PROMPT_SYMBOL = '$'
 elseif result = 4 then
-    FINAL_PROMPT = '%'
+    PROMPT_SYMBOL = '%'
 elseif result = 5 then
-    FINAL_PROMPT = ']'
+    PROMPT_SYMBOL = ']'
 else
-    FINAL_PROMPT = '#'
+    PROMPT_SYMBOL = '#'
 endif
+
+if result >= 1 and result <= 5 then
+    TRIM_VAL = inputstr
+    call trim_string
+    FINAL_PROMPT = TRIM_VAL
+else
+    FINAL_PROMPT = PROMPT_SYMBOL
+endif
+
+strlen FINAL_PROMPT
+if result = 0 then
+    FINAL_PROMPT = PROMPT_SYMBOL
+endif
+
+; ログ開始前にバッファ内の残存プロンプトをクリア
+mpause 200
+flushrecv
 
 
 ; ==============================================================================
@@ -597,6 +795,11 @@ endif
 filereadln f_cmd cmd_line
 if result = 1 goto end_cmd_loop     ; コマンド定義ファイルの末尾(EOF)到達
 
+; コマンド行の前後空白をトリム
+TRIM_VAL = cmd_line
+call trim_string
+cmd_line = TRIM_VAL
+
 strlen cmd_line
 if result = 0 goto read_cmd_loop    ; 空行スキップ
 
@@ -617,14 +820,14 @@ logwrite #13#10
 ; コマンドを機器に送信
 sendln cmd_line
 
-; コマンド実行結果の待機ループ (万一のページング表示 --More-- も自動解除)
+; コマンド実行結果の待機ループ (ページング表示 --More-- の自動解除 & 途中切断検知)
 :wait_cmd_prompt
 timeout = CMD_TIMEOUT
-; wait 最大10引数厳守
-; 1:FINAL_PROMPT, 2:--More--, 3:-- More --, 4:---(more, 5:More:, 6:続く, 7:RETURN, 8:any key
-wait FINAL_PROMPT '--More--' '-- More --' '---(more' 'More:' '続く' 'RETURN' 'any key'
+; wait 最大10引数厳守 (9個):
+; 1:FINAL_PROMPT, 2:--More--, 3:-- More --, 4:---(more, 5:More:, 6:続く, 7:RETURN, 8:any key, 9:__BASTION_RETURN__
+wait FINAL_PROMPT '--More--' '-- More --' '---(more' 'More:' '続く' 'RETURN' 'any key' '__BASTION_RETURN__'
 
-if result = 1 goto read_cmd_loop    ; プロンプトに戻ったので次のコマンドへ
+if result = 1 goto read_cmd_loop    ; 機器プロンプトに戻ったので次のコマンドへ
 
 if result >= 2 and result <= 6 then
     ; ページャー表示(--More--等)が出現したため、スペースキーを送信して続きを表示
@@ -638,7 +841,15 @@ if result >= 7 and result <= 8 then
     goto wait_cmd_prompt
 endif
 
-; タイムアウト時はログを記録して次のコマンドへ進む
+if result = 9 then
+    ; コマンド実行中に相手機器から切断されて踏み台に戻った場合
+    fileclose f_cmd
+    IS_DEVICE_LOGGED_IN = 0
+    DEV_DETAIL = 'Disconnected During Command'
+    goto cleanup_done
+endif
+
+; タイムアウト時は次のコマンドへ進む
 goto read_cmd_loop
 
 :end_cmd_loop
@@ -648,37 +859,68 @@ DEV_DETAIL = 'Success'
 
 
 ; ==============================================================================
-; 13. 対象機器からの安全切断 (踏み台セッション保護)
+; 13. 対象機器からの安全切断 (踏み台セッション完全保護)
+; ==============================================================================
+; 【重要設計】
+;   以前は '>' や ']' を wait していたため、コマンド出力の残り文字に反応して
+;   2回目の exit が踏み台シェルに誤送信され、踏み台ごと切断される原因になっていました。
+;   本バージョンでは踏み台復帰マーカー '__BASTION_RETURN__' のみを判定基準とするため、
+;   踏み台シェルに対して誤って exit を送ることは絶対にありません。
 ; ==============================================================================
 :cleanup_device
+; コマンド収集完了後、ログアウト操作がログに混入しないよう先にログをクローズ
+if IS_LOG_OPEN = 1 then
+    logclose
+    IS_LOG_OPEN = 0
+endif
+
 if IS_DEVICE_LOGGED_IN = 1 then
-    ; 相手機器からの安全ログアウト処理
-    ; 【重要】踏み台復帰後に exit を再送すると踏み台ごと切断されるため、
-    ;   'closed' や 踏み台プロンプト記号を検知した時点で即座に完了(cleanup_done)へ抜けます。
+    mpause 200
+    flushrecv
     timeout = 3
     sendln 'exit'
-    ; wait引数: 1:closed, 2:logout, 3:BASTION_PROMPT, 4:$, 5:#, 6:>, 7:]
-    wait 'closed' 'logout' BASTION_PROMPT '$' '#' '>' ']'
-    if result >= 1 and result <= 5 goto cleanup_done
-
-    ; Cisco等で特権モード(#)から一般モード(>)へ降格した場合は、もう一度だけ exit を送る
-    if result = 6 or result = 7 then
-        sendln 'exit'
+    ; 1:__BASTION_RETURN__, 2:Save, 3:(y/n), 4:[y/n]
+    wait '__BASTION_RETURN__' 'Save' '(y/n)' '[y/n]'
+    if result = 1 goto cleanup_done
+    if result >= 2 and result <= 4 then
+        sendln 'n'
         timeout = 3
-        wait 'closed' 'logout' BASTION_PROMPT '$' '#'
-        if result >= 1 and result <= 5 goto cleanup_done
+        wait '__BASTION_RETURN__'
+        if result = 1 goto cleanup_done
     endif
 
-    ; それでも戻らない場合、exit は絶対に再送せず、Ctrl+C (#3) で安全に切断・中断
+    ; 1回目の exit でまだ踏み台に戻っていない場合（Cisco等の特権 # -> 一般 > 降格時など）
+    sendln 'exit'
+    timeout = 3
+    wait '__BASTION_RETURN__' 'Save' '(y/n)' '[y/n]'
+    if result = 1 goto cleanup_done
+    if result >= 2 and result <= 4 then
+        sendln 'n'
+        timeout = 3
+        wait '__BASTION_RETURN__'
+        if result = 1 goto cleanup_done
+    endif
+
+    ; quit コマンドで抜ける機器（Yamaha / Juniper / Huawei 等）向けの試行
+    sendln 'quit'
+    timeout = 3
+    wait '__BASTION_RETURN__'
+    if result = 1 goto cleanup_done
+
+    ; それでも戻らない場合、exit は送らず Ctrl+C (#3) で安全に中断しマーカーで同期
     send #3
     mpause 300
-    sendln ''
+    sendln 'echo "__BAS""TION_RETURN__"'
     timeout = 3
-    wait 'closed' 'logout' BASTION_PROMPT '$' '#'
+    wait '__BASTION_RETURN__'
 endif
 
 :cleanup_done
-; 機器のログファイルが開かれていればクローズ
+; 次の機器の処理に影響しないよう、踏み台プロンプトの残存バッファをクリア
+mpause 200
+flushrecv
+
+; 異常系ジャンプ等で万一ログが開いたままならクローズ
 if IS_LOG_OPEN = 1 then
     logclose
     IS_LOG_OPEN = 0
@@ -689,43 +931,53 @@ endif
 ; 14. サマリCSVへの追記
 ; ==============================================================================
 :record_result
+strcompare DEV_STATUS 'OK'
+if result = 0 then
+    OK_COUNT = OK_COUNT + 1
+else
+    NG_COUNT = NG_COUNT + 1
+endif
+
 getdate TS '%Y/%m/%d %H:%M:%S'
 fileopen f_sum SUMMARY_FILE 1
 if f_sum <> -1 then
-    sprintf '%s,%s,%s,%s,%s,%s,%s' TS DEV_NAME DEV_IP DEV_PROTO FINAL_PROMPT DEV_STATUS DEV_DETAIL
+    sprintf '%s,%s,%s,%s,%s,%s,%s' TS DEV_NAME DEV_IP DEV_PROTO PROMPT_SYMBOL DEV_STATUS DEV_DETAIL
     filewriteln f_sum inputstr
     fileclose f_sum
 endif
 
 ; 次の機器へ進む前にウェイトを挿入
-mpause 500
+mpause 300
 goto read_csv_loop
 
 
 ; ==============================================================================
-; 15. 全機器終了処理 & 踏み台ログアウト
+; 15. 全機器終了処理 & 完了サマリ通知
 ; ==============================================================================
 :end_csv_loop
 fileclose f_csv
 
-; 踏み台サーバから安全にログアウト
-sendln 'exit'
-disconnect 0
+; マクロ側で新規に踏み台へ接続した場合のみログアウト（既存接続利用時は画面を残す）
+if ALREADY_CONNECTED = 0 then
+    sendln 'exit'
+    disconnect 0
+endif
 
 ; 手動実行時のみ完了ポップアップを表示 (自動実行時はサイレント終了)
 if paramcnt < 3 then
-    sprintf 'すべての機器のログ収集が完了しました。\n\n【サマリCSV】:\n%s\n\n【ログ保存先】:\n%s' SUMMARY_FILE LOG_DIR
-    messagebox inputstr 'ログ収集完了'
+    if NG_COUNT = 0 then
+        sprintf 'すべての機器のログ収集が正常に完了しました！\n\n■ 実行結果: 全 %d 台中  成功: %d 台 / 失敗: %d 台\n\n■ サマリCSV:\n%s\n\n■ ログ保存先フォルダ:\n%s' TOTAL_COUNT OK_COUNT NG_COUNT SUMMARY_FILE LOG_DIR
+        messagebox inputstr 'ログ収集完了 (全件成功)'
+    else
+        sprintf 'ログ収集処理が完了しました（一部または全件で接続エラーがあります）。\n\n■ 実行結果: 全 %d 台中  成功: %d 台 / 失敗: %d 台\n\n■ 失敗がある場合のチェックポイント:\n  1. device.csv 内のIPアドレス・ユーザー名・パスワードが実機と合っているか\n     （初期状態ではサンプル用の架空IPが記載されています）\n  2. サマリCSVの「Detail」列に記載された失敗理由をご確認ください:\n     - Connection Failed / Unreachable : IP誤り・電源断・経路なし\n     - Auth Failed (Wrong Password) : パスワード誤り\n     - SSH Algorithm Mismatch : 古い機器のため SSH_EXTRA_OPTS の有効化が必要\n\n■ サマリCSV:\n%s' TOTAL_COUNT OK_COUNT NG_COUNT SUMMARY_FILE
+        messagebox inputstr 'ログ収集完了 (要確認あり)'
+    endif
 endif
 end
 
 
 ; ==============================================================================
-; サブルーチン: 4.0x互換 CSV行パーサー (7列対応・strsplit完全代替)
-; ==============================================================================
-; 【動作説明】
-;   カンマの位置を strscan で探し、strcopy で各変数に切り出します。
-;   Tera Term 4.67 以降の strsplit を使わず、4.02 でも確実に動作する設計です。
+; サブルーチン1: 4.0x互換 CSV行パーサー (7列対応・strsplit完全代替・前後空白除去)
 ; ==============================================================================
 :parse_csv_line
     COL1 = ''
@@ -855,11 +1107,92 @@ end
     COL6 = PARSE_STR
 
     :parse_assign
-    DEV_NAME   = COL1
-    DEV_IP     = COL2
-    DEV_USER   = COL3
-    DEV_PASS   = COL4
-    DEV_ENPASS = COL5
-    DEV_PROTO  = COL6
-    DEV_CMD    = COL7
+    ; 各列の前後の空白・タブ・クォートを綺麗に除去
+    TRIM_VAL = COL1
+    call trim_string
+    DEV_NAME = TRIM_VAL
+
+    TRIM_VAL = COL2
+    call trim_string
+    DEV_IP = TRIM_VAL
+
+    TRIM_VAL = COL3
+    call trim_string
+    DEV_USER = TRIM_VAL
+
+    TRIM_VAL = COL4
+    call trim_string
+    DEV_PASS = TRIM_VAL
+
+    TRIM_VAL = COL5
+    call trim_string
+    DEV_ENPASS = TRIM_VAL
+
+    TRIM_VAL = COL6
+    call trim_string
+    DEV_PROTO = TRIM_VAL
+
+    TRIM_VAL = COL7
+    call trim_string
+    DEV_CMD = TRIM_VAL
+return
+
+
+; ==============================================================================
+; サブルーチン2: 文字列前後トリム処理 (空白・タブ・CR・LF・ダブルクォート除去)
+; ==============================================================================
+:trim_string
+    :trim_lead_loop
+    strlen TRIM_VAL
+    T_LEN = result
+    if T_LEN = 0 goto trim_str_done
+    strcopy TRIM_VAL 1 1 T_CHAR
+    strcompare T_CHAR ' '
+    if result = 0 goto cut_lead
+    strcompare T_CHAR #9
+    if result = 0 goto cut_lead
+    strcompare T_CHAR #13
+    if result = 0 goto cut_lead
+    strcompare T_CHAR #10
+    if result = 0 goto cut_lead
+    strcompare T_CHAR '"'
+    if result = 0 goto cut_lead
+    goto trim_tail_str_loop
+
+    :cut_lead
+    if T_LEN = 1 then
+        TRIM_VAL = ''
+        goto trim_str_done
+    endif
+    T_REM = T_LEN - 1
+    strcopy TRIM_VAL 2 T_REM TRIM_VAL
+    goto trim_lead_loop
+
+    :trim_tail_str_loop
+    strlen TRIM_VAL
+    T_LEN = result
+    if T_LEN = 0 goto trim_str_done
+    strcopy TRIM_VAL T_LEN 1 T_CHAR
+    strcompare T_CHAR ' '
+    if result = 0 goto cut_tail
+    strcompare T_CHAR #9
+    if result = 0 goto cut_tail
+    strcompare T_CHAR #13
+    if result = 0 goto cut_tail
+    strcompare T_CHAR #10
+    if result = 0 goto cut_tail
+    strcompare T_CHAR '"'
+    if result = 0 goto cut_tail
+    goto trim_str_done
+
+    :cut_tail
+    if T_LEN = 1 then
+        TRIM_VAL = ''
+        goto trim_str_done
+    endif
+    T_REM = T_LEN - 1
+    strcopy TRIM_VAL 1 T_REM TRIM_VAL
+    goto trim_tail_str_loop
+
+    :trim_str_done
 return
