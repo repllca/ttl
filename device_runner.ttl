@@ -232,12 +232,33 @@ endif
 
 ; 踏み台サーバのログインプロンプト待機
 timeout = 30
-wait BASTION_PROMPT '$' '#' '>'
+wait BASTION_PROMPT '$' '#' '>' '%' ']'
 if result = 0 then
-    messagebox '踏み台サーバのプロンプト待機がタイムアウトしました。' 'エラー'
+    sprintf '踏み台サーバへの接続後、プロンプト待機がタイムアウトしました。\n\n【確認項目】:\n1. BASTION_PROMPT（現在: "%s"）がサーバ側と合っているか\n2. 踏み台サーバのログインバナー等でEnter待ちになっていないか' BASTION_PROMPT
+    messagebox inputstr 'プロンプト待機タイムアウト'
     disconnect 0
     end
 endif
+
+; 踏み台サーバの実際のプロンプト記号を自動認識して更新（$ と # の不一致を自動防止）
+if result = 2 then
+    BASTION_PROMPT = '$'
+elseif result = 3 then
+    BASTION_PROMPT = '#'
+elseif result = 4 then
+    BASTION_PROMPT = '>'
+elseif result = 5 then
+    BASTION_PROMPT = '%'
+elseif result = 6 then
+    BASTION_PROMPT = ']'
+endif
+
+; 初期状態の機器情報をセット
+DEV_NAME = '(1台目の接続前)'
+DEV_IP = '未接続'
+DEV_PROTO = '-'
+DEV_STATUS = '未実行'
+DEV_DETAIL = '-'
 
 
 ; ==============================================================================
@@ -252,10 +273,32 @@ if f_csv = -1 then
 endif
 
 :read_csv_loop
-; 踏み台との通信セッションが正常に継続しているかチェック
+; 踏み台との通信セッションが正常に継続しているかチェック (2 = 正常接続中)
 testlink
-if result = 0 then
-    messagebox '踏み台サーバとの通信が切断されたため、処理を中断します。' '通信切断'
+if result <> 2 then
+    sprintf '【踏み台サーバとの接続が切断されました】\n\n'
+    ERROR_MSG = inputstr
+    sprintf '■ 発生箇所:\n  直前に処理していた機器: %s (IP: %s)\n  プロトコル: %s / ステータス: %s (%s)\n\n' DEV_NAME DEV_IP DEV_PROTO DEV_STATUS DEV_DETAIL
+    strconcat ERROR_MSG inputstr
+    strconcat ERROR_MSG '--------------------------------------------------\n'
+    strconcat ERROR_MSG '【何を修正・確認すべきかのチェックリスト】\n\n'
+    strconcat ERROR_MSG '1. 踏み台プロンプト記号の設定 (最重要)\n'
+    sprintf '   現在 device_runner.ttl の設定は BASTION_PROMPT = "%s" です。\n' BASTION_PROMPT
+    strconcat ERROR_MSG inputstr
+    strconcat ERROR_MSG '   実際の踏み台シェルの末尾記号（通常は $ または #）と一致\n'
+    strconcat ERROR_MSG '   しているか確認してください。root利用時は # に変更が必要です。\n\n'
+    strconcat ERROR_MSG '2. 対象機器への手動接続確認\n'
+    sprintf '   踏み台サーバから手動で「%s %s」を実行し、\n' DEV_PROTO DEV_IP
+    strconcat ERROR_MSG inputstr
+    strconcat ERROR_MSG '   踏み台から相手機器へ通信が届くか確認してください。\n\n'
+    strconcat ERROR_MSG '3. 踏み台サーバのアイドルタイムアウト (TMOUT)\n'
+    strconcat ERROR_MSG '   踏み台側の環境変数 TMOUT や SSH設定で短時間切断されていないか\n'
+    strconcat ERROR_MSG '   ご確認ください。\n'
+    strconcat ERROR_MSG '--------------------------------------------------\n'
+    sprintf '※切断前までの結果は以下に保存されています:\n%s' SUMMARY_FILE
+    strconcat ERROR_MSG inputstr
+
+    messagebox ERROR_MSG '通信切断エラー (原因と対処方法)'
     fileclose f_csv
     end
 endif
@@ -609,41 +652,29 @@ DEV_DETAIL = 'Success'
 ; ==============================================================================
 :cleanup_device
 if IS_DEVICE_LOGGED_IN = 1 then
-    ; 機器にログインしている場合のみ exit / quit を送って踏み台シェルに戻る
+    ; 相手機器からの安全ログアウト処理
+    ; 【重要】踏み台復帰後に exit を再送すると踏み台ごと切断されるため、
+    ;   'closed' や 踏み台プロンプト記号を検知した時点で即座に完了(cleanup_done)へ抜けます。
     timeout = 3
     sendln 'exit'
-    wait BASTION_PROMPT 'Save' '(y/n)' '[y/n]' '>' '#' '$' ']'
-    if result = 1 goto cleanup_done
-    if result >= 2 and result <= 4 then
-        sendln 'n'
+    ; wait引数: 1:closed, 2:logout, 3:BASTION_PROMPT, 4:$, 5:#, 6:>, 7:]
+    wait 'closed' 'logout' BASTION_PROMPT '$' '#' '>' ']'
+    if result >= 1 and result <= 5 goto cleanup_done
+
+    ; Cisco等で特権モード(#)から一般モード(>)へ降格した場合は、もう一度だけ exit を送る
+    if result = 6 or result = 7 then
+        sendln 'exit'
+        timeout = 3
+        wait 'closed' 'logout' BASTION_PROMPT '$' '#'
+        if result >= 1 and result <= 5 goto cleanup_done
     endif
 
-    sendln 'exit'
-    timeout = 3
-    wait BASTION_PROMPT 'Save' '(y/n)' '[y/n]'
-    if result = 1 goto cleanup_done
-    if result >= 2 and result <= 4 then
-        sendln 'n'
-    endif
-
-    sendln 'quit'
-    timeout = 3
-    wait BASTION_PROMPT
-    if result = 1 goto cleanup_done
-
-    ; 応答がない場合は Ctrl+C を送信して強制リセット
+    ; それでも戻らない場合、exit は絶対に再送せず、Ctrl+C (#3) で安全に切断・中断
     send #3
-    mpause 200
-    sendln 'exit'
-    timeout = 3
-    wait BASTION_PROMPT
-    if result = 1 goto cleanup_done
-
-    ; SSHエスケープシーケンスによる緊急切断 (~.)
-    send '~.'
-    mpause 500
+    mpause 300
     sendln ''
-    wait BASTION_PROMPT
+    timeout = 3
+    wait 'closed' 'logout' BASTION_PROMPT '$' '#'
 endif
 
 :cleanup_done
