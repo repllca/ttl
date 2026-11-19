@@ -703,6 +703,8 @@ if result > 0 then
 endif
 strconcat SEND_CMD DEV_IP
 strconcat SEND_CMD ' ; echo "__BAS""TION_RETURN__"'
+testlink
+if result <> 2 goto bastion_disconnected
 sendln SEND_CMD
 goto login_negotiate_loop
 
@@ -711,6 +713,8 @@ goto login_negotiate_loop
 SEND_CMD = 'telnet '
 strconcat SEND_CMD DEV_IP
 strconcat SEND_CMD ' ; echo "__BAS""TION_RETURN__"'
+testlink
+if result <> 2 goto bastion_disconnected
 sendln SEND_CMD
 
 
@@ -735,18 +739,24 @@ wait 'yes/no' 'ogin:' 'ser:' 'assword:' '__BASTION_RETURN__' 'no matching' 'Unab
 
 if result = 1 then
     ; 初回SSH接続時のフィンガープリント確認 (yes/no)
+    testlink
+    if result <> 2 goto bastion_disconnected
     sendln 'yes'
     goto login_stage1_loop
 endif
 
 if result = 2 or result = 3 then
     ; ユーザー名入力要求 (login: / Username:)
+    testlink
+    if result <> 2 goto bastion_disconnected
     sendln ACTIVE_USER
     goto login_stage1_loop
 endif
 
 if result = 4 then
     ; パスワード入力要求 (Password:) -> パスワードを送信して【第2段階】へ進む
+    testlink
+    if result <> 2 goto bastion_disconnected
     sendln ACTIVE_PASS
     goto login_stage2_wait
 endif
@@ -1068,8 +1078,12 @@ wait '#' '>' '$' '%' ']'
 ; ------------------------------------------------------
 mpause 200
 flushrecv
+testlink
+if result <> 2 goto bastion_disconnected
 sendln ''
 mpause 200
+testlink
+if result <> 2 goto bastion_disconnected
 sendln ''
 timeout = 5
 waitln '#' '>' '$' '%' ']'
@@ -1230,47 +1244,50 @@ if IS_LOG_OPEN = 1 then
 endif
 
 if IS_DEVICE_LOGGED_IN = 1 then
-    mpause 200
+    ; 踏み台との通信セッションが正常に継続しているかチェック
+    testlink
+    if result <> 2 goto bastion_disconnected
+
+    ; コマンド出力の残骸を完全にフラッシュ
+    mpause 300
     flushrecv
-    timeout = 3
+
+    ; 1) 対象機器へのログアウトコマンド (exit) を送信
     sendln 'exit'
-    ; 1:__BASTION_RETURN__, 2:Save, 3:(y/n), 4:[y/n]
-    wait '__BASTION_RETURN__' 'Save' '(y/n)' '[y/n]'
+    timeout = 7
+    ; 引数(5個): 1:__BASTION_RETURN__, 2:Save new configuration ? (y/n), 3:Save? [yes/no], 4:(y/n), 5:[y/n]
+    wait '__BASTION_RETURN__' 'Save new configuration ? (y/n)' 'Save? [yes/no]' '(y/n)' '[y/n]'
     if result = 1 goto cleanup_done
-    if result >= 2 and result <= 4 then
+    if result >= 2 and result <= 5 then
+        testlink
+        if result <> 2 goto bastion_disconnected
         sendln 'n'
-        timeout = 3
+        timeout = 7
         wait '__BASTION_RETURN__'
         if result = 1 goto cleanup_done
     endif
 
-    ; 1回目の exit でまだ踏み台に戻っていない場合（Cisco等の特権 # -> 一般 > 降格時など）
-    sendln 'exit'
-    timeout = 3
-    wait '__BASTION_RETURN__' 'Save' '(y/n)' '[y/n]'
-    if result = 1 goto cleanup_done
-    if result >= 2 and result <= 4 then
-        sendln 'n'
-        timeout = 3
-        wait '__BASTION_RETURN__'
-        if result = 1 goto cleanup_done
-    endif
-
-    ; quit コマンドで抜ける機器（Yamaha / Juniper / Huawei 等）向けの試行
+    ; 2) exit で戻らなかった場合（Yamaha / Juniper / Huawei 等）、quit コマンドを試行
+    ; ※踏み台シェルを巻き添え切断しないよう、2回目の exit は絶対に送信しません
+    testlink
+    if result <> 2 goto bastion_disconnected
     sendln 'quit'
-    timeout = 3
+    timeout = 5
     wait '__BASTION_RETURN__'
     if result = 1 goto cleanup_done
 
-    ; それでも戻らない場合、exit は送らず Ctrl+C (#3) で安全に中断しマーカーで同期
+    ; 3) それでも戻らない場合、Ctrl+C (#3) で安全に中断しマーカーで同期
     send #3
     mpause 300
+    testlink
+    if result <> 2 goto bastion_disconnected
     sendln 'echo "__BAS""TION_RETURN__"'
-    timeout = 3
+    timeout = 5
     wait '__BASTION_RETURN__'
 endif
 
 :cleanup_done
+IS_DEVICE_LOGGED_IN = 0
 ; 外部パスワードファイルが開いていればクローズ
 if F_CRED_OPEN = 1 then
     fileclose f_cred
