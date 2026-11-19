@@ -52,7 +52,7 @@ SUMMARY_FILE = inputstr
 
 fileopen sum_fh SUMMARY_FILE 0
 if sum_fh = -1 then
-    sprintf '指定された保存先ディレクトリを作成できないか、書き込み権限がありません:\n%s' LOG_DIR
+    sprintf '指定された保存先ディレクトリを作成できないか、書き込み権限がありません:'#13#10'%s' LOG_DIR
     messagebox inputstr 'フォルダエラー'
     end
 endif
@@ -133,7 +133,7 @@ if result = 0 then
 endif
 
 enablekeyb 1
-sprintf 'すべての機器のログ取得が完了しました。\n保存先: %s' LOG_DIR
+sprintf 'すべての機器のログ取得が完了しました。'#13#10'保存先: %s' LOG_DIR
 messagebox inputstr '完了'
 end
 

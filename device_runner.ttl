@@ -50,6 +50,9 @@
 getdir BASE_DIR
 setdir BASE_DIR
 
+; 改行文字定義 (Tera Term 4.02 / Windows MessageBox 互換用 CRLF)
+CRLF = #13#10
+
 
 ; ==============================================================================
 ; 2. ★【ユーザー設定エリア】
@@ -80,6 +83,12 @@ FALLBACK_TO_CRED_FILE = 0                 ; 0: device.csv 固有パスワード�
 ; --- タイムアウト設定 (単位: 秒) ---
 LOGIN_TIMEOUT  = 15                 ; 機器へのログイン応答を待つ最大秒数
 CMD_TIMEOUT    = 30                 ; 各コマンドの実行結果を待つ最大秒数
+
+; --- 試行・待機ウェイト設定 (単位: 秒) ---
+; 【変更のポイント】実機の不正ログイン検知（ブルートフォース防御 / Quiet Mode / アカウントロック）
+; やセッション枯渇を回避するため、認証失敗後の再試行間隔や、機器間の待機秒数を調整できます。
+AUTH_RETRY_INTERVAL = 2             ; 認証失敗後に次のパスワード候補を試行するまでの待機秒数 (推奨: 2〜3秒)
+DEVICE_INTERVAL     = 1             ; 1台の処理完了後、次の機器の処理を開始するまでの待機秒数 (推奨: 1〜2秒)
 
 ; --- 全機器共通のフォールバック認証候補プール（オプション） ---
 ; 【変更のポイント】
@@ -174,7 +183,10 @@ else
         endif
     else
         ; すでに踏み台に接続済みの場合は、CSV内でパスワード省略時に使う共通パスワードのみ確認
-        passwordbox '現在接続中の踏み台セッションをそのまま使用します。\nCSVでパスワード省略時に使う共通パスワードを入力してください（不要なら空欄のままOK）:' '共通パスワード確認（省略可）'
+        DLG_MSG = '現在接続中の踏み台セッションをそのまま使用します。'
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG 'CSVでパスワード省略時に使う共通パスワードを入力してください（不要なら空欄のままOK）:'
+        passwordbox DLG_MSG '共通パスワード確認（省略可）'
         BASTION_PASS = inputstr
     endif
 
@@ -205,8 +217,13 @@ else
     ; CSVファイルが存在するか事前にチェック（存在しない場合はエラー表示して終了）
     fileopen f_chk CSV_FILE 0 1
     if f_chk = -1 then
-        sprintf '指定された機器一覧CSVファイルが見つかりません:\n%s\n\nファイル名や配置場所をご確認ください。' CSV_FILE
-        messagebox inputstr 'エラー: CSVファイル不存在'
+        DLG_MSG = '指定された機器一覧CSVファイルが見つかりません:'
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG CSV_FILE
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG 'ファイル名や配置場所をご確認ください。'
+        messagebox DLG_MSG 'エラー: CSVファイル不存在'
         end
     endif
     fileclose f_chk
@@ -238,7 +255,10 @@ else
     ; ----------------------------------------------------
     ; ポップアップ⑥: 外部パスワード一覧CSVファイル (省略可)
     ; ----------------------------------------------------
-    inputbox '外部パスワードCSVファイル名（ユーザー名,パスワード,管理者PW）を入力してください:\n（使用しない場合は空欄のままOK）' '外部パスワードCSV選択（省略可）' CRED_FILE
+    DLG_MSG = '外部パスワードCSVファイル名（ユーザー名,パスワード,管理者PW）を入力してください:'
+    strconcat DLG_MSG CRLF
+    strconcat DLG_MSG '（使用しない場合は空欄のままOK）'
+    inputbox DLG_MSG '外部パスワードCSV選択（省略可）' CRED_FILE
     CRED_FILE = inputstr
 
     strlen CRED_FILE
@@ -260,8 +280,13 @@ else
         if f_chk <> -1 then
             fileclose f_chk
         else
-            sprintf '指定された外部パスワードCSVが見つかりません:\n%s\n\nパスワードCSVを使用せずに処理を続行します。' CRED_FILE
-            messagebox inputstr 'パスワードCSV不存在'
+            DLG_MSG = '指定された外部パスワードCSVが見つかりません:'
+            strconcat DLG_MSG CRLF
+            strconcat DLG_MSG CRED_FILE
+            strconcat DLG_MSG CRLF
+            strconcat DLG_MSG CRLF
+            strconcat DLG_MSG 'パスワードCSVを使用せずに処理を続行します。'
+            messagebox DLG_MSG 'パスワードCSV不存在'
             CRED_FILE = ''
         endif
     endif
@@ -337,8 +362,20 @@ if ALREADY_CONNECTED = 0 then
 
     ; connect コマンドの戻り値判定 (2 = 接続成功)
     if result <> 2 then
-        sprintf '踏み台サーバ (%s) へのSSH接続に失敗しました。\n\n【確認項目】:\n1. 踏み台サーバのIPアドレス(%s)とポート番号(%s)が正しいか\n2. ユーザー名(%s)とパスワードが正しいか\n3. PCから踏み台サーバへネットワークが繋がっているか' BASTION_HOST BASTION_HOST BASTION_PORT BASTION_USER
-        messagebox inputstr '踏み台SSH接続エラー'
+        sprintf '踏み台サーバ (%s) へのSSH接続に失敗しました。' BASTION_HOST
+        DLG_MSG = inputstr
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG '【確認項目】:'
+        strconcat DLG_MSG CRLF
+        sprintf '1. 踏み台サーバのIPアドレス(%s)とポート番号(%s)が正しいか' BASTION_HOST BASTION_PORT
+        strconcat DLG_MSG inputstr
+        strconcat DLG_MSG CRLF
+        sprintf '2. ユーザー名(%s)とパスワードが正しいか' BASTION_USER
+        strconcat DLG_MSG inputstr
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG '3. PCから踏み台サーバへネットワークが繋がっているか'
+        messagebox DLG_MSG '踏み台SSH接続エラー'
         end
     endif
 
@@ -346,8 +383,15 @@ if ALREADY_CONNECTED = 0 then
     timeout = 30
     wait BASTION_PROMPT '$' '#' '>' '%' ']'
     if result = 0 then
-        sprintf '踏み台サーバへの接続後、プロンプト待機がタイムアウトしました。\n\n【確認項目】:\n1. パスワードが間違っていないか（画面上で再入力待ちになっていないか）\n2. 踏み台サーバのログインバナー等でEnter待ちになっていないか'
-        messagebox inputstr 'プロンプト待機タイムアウト'
+        DLG_MSG = '踏み台サーバへの接続後、プロンプト待機がタイムアウトしました。'
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG '【確認項目】:'
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG '1. パスワードが間違っていないか（画面上で再入力待ちになっていないか）'
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG '2. 踏み台サーバのログインバナー等でEnter待ちになっていないか'
+        messagebox DLG_MSG 'プロンプト待機タイムアウト'
         disconnect 0
         end
     endif
@@ -943,9 +987,15 @@ endif
 ; ★【認証失敗時の次候補判定】
 ; ------------------------------------------------------
 :check_next_credential
+; 認証失敗後の再試行ウェイト（実機のブルートフォース防御・連続失敗ロック回避）
+if AUTH_RETRY_INTERVAL > 0 then
+    pause AUTH_RETRY_INTERVAL
+else
+    mpause 300
+endif
+
 ; 1) 外部パスワードCSVファイルがすでに開いている場合は、次の行を読む
 if F_CRED_OPEN = 1 then
-    mpause 300
     flushrecv
     goto read_cred_csv_loop
 endif
@@ -956,7 +1006,6 @@ REM_U_LEN = result
 strlen REMAIN_PASS
 REM_P_LEN = result
 if REM_U_LEN > 0 or REM_P_LEN > 0 then
-    mpause 300
     flushrecv
     goto try_inline_credential
 endif
@@ -965,7 +1014,6 @@ endif
 strlen CRED_FILE
 if result > 0 and F_CRED_TRIED = 0 then
     if HAS_DEV_CRED = 0 or FALLBACK_TO_CRED_FILE = 1 then
-        mpause 300
         flushrecv
         goto open_cred_csv_file
     endif
@@ -1375,7 +1423,11 @@ if f_sum <> -1 then
 endif
 
 ; 次の機器へ進む前にウェイトを挿入
-mpause 300
+if DEVICE_INTERVAL > 0 then
+    pause DEVICE_INTERVAL
+else
+    mpause 300
+endif
 goto read_csv_loop
 
 
@@ -1398,11 +1450,51 @@ endif
 ; 手動実行時のみ完了ポップアップを表示 (自動実行時はサイレント終了)
 if paramcnt < 3 then
     if NG_COUNT = 0 then
-        sprintf 'すべての機器のログ収集が正常に完了しました！\n\n■ 実行結果: 全 %d 台中  成功: %d 台 / 失敗: %d 台\n\n■ サマリCSV:\n%s\n\n■ ログ保存先フォルダ:\n%s' TOTAL_COUNT OK_COUNT NG_COUNT SUMMARY_FILE LOG_DIR
-        messagebox inputstr 'ログ収集完了 (全件成功)'
+        sprintf 'すべての機器のログ収集が正常に完了しました！'
+        DLG_MSG = inputstr
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG CRLF
+        sprintf '■ 実行結果: 全 %d 台中  成功: %d 台 / 失敗: %d 台' TOTAL_COUNT OK_COUNT NG_COUNT
+        strconcat DLG_MSG inputstr
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG '■ サマリCSV:'
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG SUMMARY_FILE
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG '■ ログ保存先フォルダ:'
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG LOG_DIR
+        messagebox DLG_MSG 'ログ収集完了 (全件成功)'
     else
-        sprintf 'ログ収集処理が完了しました（一部または全件で接続エラーがあります）。\n\n■ 実行結果: 全 %d 台中  成功: %d 台 / 失敗: %d 台\n\n■ 失敗がある場合のチェックポイント:\n  1. device.csv 内のIPアドレス・ユーザー名・パスワードが実機と合っているか\n     （初期状態ではサンプル用の架空IPが記載されています）\n  2. サマリCSVの「Detail」列に記載された失敗理由をご確認ください:\n     - Connection Failed / Unreachable : IP誤り・電源断・経路なし\n     - Auth Failed (Wrong Password) : パスワード誤り\n     - SSH Algorithm Mismatch : 古い機器のため SSH_EXTRA_OPTS の有効化が必要\n\n■ サマリCSV:\n%s' TOTAL_COUNT OK_COUNT NG_COUNT SUMMARY_FILE
-        messagebox inputstr 'ログ収集完了 (要確認あり)'
+        sprintf 'ログ収集処理が完了しました（一部または全件で接続エラーがあります）。'
+        DLG_MSG = inputstr
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG CRLF
+        sprintf '■ 実行結果: 全 %d 台中  成功: %d 台 / 失敗: %d 台' TOTAL_COUNT OK_COUNT NG_COUNT
+        strconcat DLG_MSG inputstr
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG '■ 失敗がある場合のチェックポイント:'
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG '  1. device.csv 内のIPアドレス・ユーザー名・パスワードが実機と合っているか'
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG '     （初期状態ではサンプル用の架空IPが記載されています）'
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG '  2. サマリCSVの「Detail」列に記載された失敗理由をご確認ください:'
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG '     - Connection Failed / Unreachable : IP誤り・電源断・経路なし'
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG '     - Auth Failed / Auth Attempts Failed : パスワード誤りまたは実機ロック'
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG '     - SSH Algorithm Mismatch : 古い機器のため SSH_EXTRA_OPTS の有効化が必要'
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG '■ サマリCSV:'
+        strconcat DLG_MSG CRLF
+        strconcat DLG_MSG SUMMARY_FILE
+        messagebox DLG_MSG 'ログ収集完了 (要確認あり)'
     endif
 endif
 end
@@ -1422,25 +1514,50 @@ if F_CRED_OPEN = 1 then
 endif
 fileclose f_csv
 
-sprintf '【踏み台サーバとの接続が切断されました】'#13#10#13#10
-ERROR_MSG = inputstr
-sprintf '■ 発生状況:'#13#10'  処理中だった機器: %s (IP: %s)'#13#10'  プロトコル: %s / ステータス: %s (%s)'#13#10#13#10 DEV_NAME DEV_IP DEV_PROTO DEV_STATUS DEV_DETAIL
+ERROR_MSG = '【踏み台サーバとの接続が切断されました】'
+strconcat ERROR_MSG CRLF
+strconcat ERROR_MSG CRLF
+strconcat ERROR_MSG '■ 発生状況:'
+strconcat ERROR_MSG CRLF
+sprintf '  処理中だった機器: %s (IP: %s)' DEV_NAME DEV_IP
 strconcat ERROR_MSG inputstr
-strconcat ERROR_MSG '--------------------------------------------------'#13#10
-strconcat ERROR_MSG '【エラーの原因と確認・対処いただきたいポイント】'#13#10#13#10
-strconcat ERROR_MSG '1. device.csv のIPアドレスが実在し、到達可能か確認'#13#10
-strconcat ERROR_MSG '   サンプルの架空IP (192.168.10.x) のまま実行している場合、'#13#10
-strconcat ERROR_MSG '   接続待ちでタイムアウトが連続し、踏み台セッションが切断されます。'#13#10
-strconcat ERROR_MSG '   実在する対象機器のIPアドレスに変更してください。'#13#10#13#10
-strconcat ERROR_MSG '2. 踏み台サーバ側の自動切断設定 (TMOUT / ClientAlive)'#13#10
-strconcat ERROR_MSG '   踏み台サーバ側の環境変数 TMOUT や sshd の設定により、'#13#10
-strconcat ERROR_MSG '   一定時間の無通信や待機で自動ログアウトされた可能性があります。'#13#10#13#10
-strconcat ERROR_MSG '3. ネットワーク・VPN接続の健全性'#13#10
-strconcat ERROR_MSG '   PCから踏み台サーバへのネットワークやVPN接続が切れていないか'#13#10
-strconcat ERROR_MSG '   ご確認ください。'#13#10
-strconcat ERROR_MSG '--------------------------------------------------'#13#10
-sprintf '※切断直前までの実行結果は以下に保存されています:'#13#10'%s' SUMMARY_FILE
+strconcat ERROR_MSG CRLF
+sprintf '  プロトコル: %s / ステータス: %s (%s)' DEV_PROTO DEV_STATUS DEV_DETAIL
 strconcat ERROR_MSG inputstr
+strconcat ERROR_MSG CRLF
+strconcat ERROR_MSG CRLF
+strconcat ERROR_MSG '--------------------------------------------------'
+strconcat ERROR_MSG CRLF
+strconcat ERROR_MSG '【エラーの原因と確認・対処いただきたいポイント】'
+strconcat ERROR_MSG CRLF
+strconcat ERROR_MSG CRLF
+strconcat ERROR_MSG '1. device.csv のIPアドレスが実在し、到達可能か確認'
+strconcat ERROR_MSG CRLF
+strconcat ERROR_MSG '   サンプルの架空IP (192.168.10.x) のまま実行している場合、'
+strconcat ERROR_MSG CRLF
+strconcat ERROR_MSG '   接続待ちでタイムアウトが連続し、踏み台セッションが切断されます。'
+strconcat ERROR_MSG CRLF
+strconcat ERROR_MSG '   実在する対象機器のIPアドレスに変更してください。'
+strconcat ERROR_MSG CRLF
+strconcat ERROR_MSG CRLF
+strconcat ERROR_MSG '2. 踏み台サーバ側の自動切断設定 (TMOUT / ClientAlive)'
+strconcat ERROR_MSG CRLF
+strconcat ERROR_MSG '   踏み台サーバ側の環境変数 TMOUT や sshd の設定により、'
+strconcat ERROR_MSG CRLF
+strconcat ERROR_MSG '   一定時間の無通信や待機で自動ログアウトされた可能性があります。'
+strconcat ERROR_MSG CRLF
+strconcat ERROR_MSG CRLF
+strconcat ERROR_MSG '3. ネットワーク・VPN接続の健全性'
+strconcat ERROR_MSG CRLF
+strconcat ERROR_MSG '   PCから踏み台サーバへのネットワークやVPN接続が切れていないか'
+strconcat ERROR_MSG CRLF
+strconcat ERROR_MSG '   ご確認ください。'
+strconcat ERROR_MSG CRLF
+strconcat ERROR_MSG '--------------------------------------------------'
+strconcat ERROR_MSG CRLF
+strconcat ERROR_MSG '※切断直前までの実行結果は以下に保存されています:'
+strconcat ERROR_MSG CRLF
+strconcat ERROR_MSG SUMMARY_FILE
 
 messagebox ERROR_MSG '踏み台通信切断エラー (原因と対処方法)'
 end

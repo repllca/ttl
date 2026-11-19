@@ -360,6 +360,24 @@ class TestCredentialQueueSubroutine(unittest.TestCase):
         self.assertEqual(self.engine.vars["C_PASS"], "RootPW!")
         self.assertEqual(self.engine.vars["C_ENPASS"], "")
 
+    def test_interval_settings_and_no_unescaped_newlines(self):
+        """Verify that AUTH_RETRY_INTERVAL and DEVICE_INTERVAL are configured and no raw \\n exists in TTL."""
+        with open(TTL_FILE, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        self.assertIn("AUTH_RETRY_INTERVAL", content)
+        self.assertIn("DEVICE_INTERVAL", content)
+        self.assertIn("CRLF = #13#10", content)
+
+        # Ensure no raw \n exists in string literals or sprintf in any .ttl file
+        for filename in ("device_runner.ttl", "test.ttl"):
+            path = os.path.join(WORKSPACE_DIR, filename)
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    for line_no, line in enumerate(f, 1):
+                        code = line.split(";", 1)[0]
+                        self.assertNotIn(r"\n", code, f"Found raw \\n in {filename}:{line_no} - use CRLF (#13#10) instead")
+
 
 if __name__ == "__main__":
     unittest.main()
