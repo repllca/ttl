@@ -373,6 +373,76 @@ class TestEndToEndSimulation(unittest.TestCase):
             if os.path.exists(temp_dev):
                 os.remove(temp_dev)
 
+    def test_protocol_filtering_and_dual_try_feature(self):
+        """
+        Verify:
+        1. When device protocol is specified in device.csv (e.g. ssh),
+           telnet candidates in credentials.csv are skipped, and matching ssh candidate is used.
+        2. When device protocol is NOT specified in device.csv (empty),
+           candidates with specific protocols (ssh / telnet) are tried,
+           and candidates with empty protocol try both SSH and Telnet.
+        """
+        import tempfile
+        logs_dir = os.path.join(WORKSPACE_DIR, "logs")
+        if os.path.exists(logs_dir):
+            import shutil
+            shutil.rmtree(logs_dir)
+
+        # 1. Credentials CSV with protocols
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", dir=WORKSPACE_DIR, delete=False, encoding="utf-8") as tf_cred:
+            tf_cred.write(
+                "# ユーザー名,パスワード,管理者パスワード,プロトコル\n"
+                "telnet_user, Pass1234 , , telnet\n"
+                "ssh_user, Pass1234 , EnablePass123 , ssh\n"
+            )
+            temp_cred = tf_cred.name
+
+        # 2. Device CSV:
+        # - DEV-SSH-01 explicitly specifies 'ssh'
+        # - DEV-UNSPEC-01 specifies empty protocol (should match telnet candidate!)
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", dir=WORKSPACE_DIR, delete=False, encoding="utf-8") as tf_dev:
+            tf_dev.write(
+                "# ホスト名,IPアドレス,ユーザー名,パスワード,管理者パスワード,プロトコル,コマンドファイル\n"
+                "DEV-SSH-01, 192.168.10.1 , , , , ssh , commands_cisco.txt\n"
+                "DEV-TELNET-01, 192.168.10.5 , , , , , commands_cisco.txt\n"
+            )
+            temp_dev = tf_dev.name
+
+        try:
+            session = MockSession()
+            engine = TTLEngine(
+                WORKSPACE_DIR,
+                session,
+                params=["device_runner.ttl", "logs", "mock_pass", temp_dev, temp_cred]
+            )
+            engine.load_script(TTL_FILE)
+            engine.run()
+
+            summary_files = glob.glob(os.path.join(logs_dir, "summary_*.csv"))
+            self.assertGreater(len(summary_files), 0)
+            with open(summary_files[-1], "r", encoding="utf-8") as f:
+                content = f.read()
+
+            lines = [l for l in content.splitlines() if l.strip() and not l.startswith("Timestamp")]
+            self.assertEqual(len(lines), 2)
+
+            res = {l.split(",")[1]: l.split(",") for l in lines}
+
+            # DEV-SSH-01 should skip telnet_user and succeed with ssh_user via ssh
+            self.assertEqual(res["DEV-SSH-01"][3], "ssh")
+            self.assertEqual(res["DEV-SSH-01"][5], "OK")
+            self.assertEqual(res["DEV-SSH-01"][7], "ssh_user")
+
+            # DEV-TELNET-01 had empty protocol in device.csv, so it matches telnet_user and succeeds via telnet
+            self.assertEqual(res["DEV-TELNET-01"][3], "telnet")
+            self.assertEqual(res["DEV-TELNET-01"][5], "OK")
+            self.assertEqual(res["DEV-TELNET-01"][7], "telnet_user")
+        finally:
+            if os.path.exists(temp_cred):
+                os.remove(temp_cred)
+            if os.path.exists(temp_dev):
+                os.remove(temp_dev)
+
 
 if __name__ == "__main__":
     unittest.main()

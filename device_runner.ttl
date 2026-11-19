@@ -500,10 +500,14 @@ if result = 0 then
     DEV_NAME = DEV_IP
 endif
 
-; 2) プロトコル未記載時: デフォルトは ssh
-strlen DEV_PROTO
+; 2) プロトコル元指定の記録 (未指定時は両方試行モード用フラグをセット)
+ORIG_DEV_PROTO = DEV_PROTO
+strlen ORIG_DEV_PROTO
 if result = 0 then
+    HAS_ORIG_PROTO = 0
     DEV_PROTO = 'ssh'
+else
+    HAS_ORIG_PROTO = 1
 endif
 
 ; 3) コマンドファイル未指定時: 汎用コマンドファイル(commands_universal.txt)を使用
@@ -535,6 +539,7 @@ IS_DEVICE_LOGGED_IN = 0
 AUTH_ATTEMPT = 0
 F_CRED_OPEN = 0
 F_CRED_TRIED = 0
+PROTO_DUAL_PHASE = 0
 ACTIVE_USER = ''
 ACTIVE_PASS = ''
 ACTIVE_ENPASS = ''
@@ -631,6 +636,14 @@ strlen ACTIVE_ENPASS
 if result = 0 then
     ACTIVE_ENPASS = ACTIVE_PASS
 endif
+
+if HAS_ORIG_PROTO = 0 then
+    DEV_PROTO = 'ssh'
+    PROTO_DUAL_PHASE = 1
+else
+    DEV_PROTO = ORIG_DEV_PROTO
+    PROTO_DUAL_PHASE = 0
+endif
 goto issue_connect_cmd
 
 
@@ -721,6 +734,57 @@ if HAS_DEV_CRED = 1 and AUTH_ATTEMPT = 1 then
     endif
 endif
 
+; プロトコル適合性チェック & 選択
+strlen C_PROTO
+CP_PROTO_LEN = result
+
+if HAS_ORIG_PROTO = 1 then
+    ; 機器側でプロトコルが元々指定されている場合: 一致するもののみ試行
+    if CP_PROTO_LEN > 0 then
+        strcompare C_PROTO ORIG_DEV_PROTO
+        if result <> 0 then
+            IS_PROTO_MATCH = 0
+            strcompare ORIG_DEV_PROTO 'ssh'
+            if result = 0 then
+                strcompare C_PROTO 'SSH'
+                if result = 0 IS_PROTO_MATCH = 1
+            endif
+            strcompare ORIG_DEV_PROTO 'SSH'
+            if result = 0 then
+                strcompare C_PROTO 'ssh'
+                if result = 0 IS_PROTO_MATCH = 1
+            endif
+            strcompare ORIG_DEV_PROTO 'telnet'
+            if result = 0 then
+                strcompare C_PROTO 'TELNET'
+                if result = 0 IS_PROTO_MATCH = 1
+            endif
+            strcompare ORIG_DEV_PROTO 'TELNET'
+            if result = 0 then
+                strcompare C_PROTO 'telnet'
+                if result = 0 IS_PROTO_MATCH = 1
+            endif
+            if IS_PROTO_MATCH = 0 then
+                ; プロトコル不一致のためスキップ
+                goto read_cred_csv_loop
+            endif
+        endif
+    endif
+    DEV_PROTO = ORIG_DEV_PROTO
+    PROTO_DUAL_PHASE = 0
+else
+    ; 機器側でプロトコルが元々未指定の場合
+    if CP_PROTO_LEN > 0 then
+        ; credentials.csv 側で指定されているプロトコルを使用
+        DEV_PROTO = C_PROTO
+        PROTO_DUAL_PHASE = 0
+    else
+        ; どちらも未指定なら両方試す (まずSSH、失敗時Telnet)
+        DEV_PROTO = 'ssh'
+        PROTO_DUAL_PHASE = 1
+    endif
+endif
+
 AUTH_ATTEMPT = AUTH_ATTEMPT + 1
 ACTIVE_USER = C_USER
 ACTIVE_PASS = C_PASS
@@ -807,7 +871,12 @@ endif
 
 if result = 5 then
     ; SSH/Telnetが即座に終了して踏み台に戻った（接続拒否・ホスト不在等）
-    ; ※機器IP自体に接続できない場合は、無駄なPW候補リトライをせず即座にNG記録して次へ進む
+    if PROTO_DUAL_PHASE = 1 then
+        goto check_next_credential
+    endif
+    if HAS_ORIG_PROTO = 0 and F_CRED_OPEN = 1 then
+        goto check_next_credential
+    endif
     DEV_STATUS = 'NG'
     DEV_DETAIL = 'Connection Failed / Closed by Host'
     goto record_result
@@ -817,6 +886,12 @@ if result = 6 or result = 7 then
     ; 古い機器でSSH鍵交換アルゴリズム等が不一致の場合
     timeout = 5
     wait '__BASTION_RETURN__'
+    if PROTO_DUAL_PHASE = 1 then
+        goto check_next_credential
+    endif
+    if HAS_ORIG_PROTO = 0 and F_CRED_OPEN = 1 then
+        goto check_next_credential
+    endif
     DEV_DETAIL = 'SSH Algorithm Mismatch (Check SSH_EXTRA_OPTS)'
     goto record_result
 endif
@@ -825,6 +900,14 @@ if result = 8 or result = 9 then
     ; Connection refused / Network is unreachable
     timeout = 5
     wait '__BASTION_RETURN__'
+    if result = 8 then
+        if PROTO_DUAL_PHASE = 1 then
+            goto check_next_credential
+        endif
+        if HAS_ORIG_PROTO = 0 and F_CRED_OPEN = 1 then
+            goto check_next_credential
+        endif
+    endif
     DEV_DETAIL = 'Connection Refused / Unreachable'
     goto record_result
 endif
@@ -987,6 +1070,20 @@ endif
 ; ★【認証失敗時の次候補判定】
 ; ------------------------------------------------------
 :check_next_credential
+; 両方試すモード (PROTO_DUAL_PHASE = 1: SSH失敗時) なら、同一認証情報でTelnetを試行
+if PROTO_DUAL_PHASE = 1 then
+    PROTO_DUAL_PHASE = 2
+    DEV_PROTO = 'telnet'
+    AUTH_ATTEMPT = AUTH_ATTEMPT + 1
+    if AUTH_RETRY_INTERVAL > 0 then
+        pause AUTH_RETRY_INTERVAL
+    else
+        mpause 300
+    endif
+    goto issue_connect_cmd
+endif
+PROTO_DUAL_PHASE = 0
+
 ; 認証失敗後の再試行ウェイト（実機のブルートフォース防御・連続失敗ロック回避）
 if AUTH_RETRY_INTERVAL > 0 then
     pause AUTH_RETRY_INTERVAL
@@ -1959,14 +2056,15 @@ return
 
 
 ; ==============================================================================
-; サブルーチン4: 外部パスワードCSV行パーサー (ユーザー名, パスワード, 管理者パスワード)
+; サブルーチン4: 外部パスワードCSV行パーサー (ユーザー名, パスワード, 管理者パスワード, プロトコル)
 ; 入力: PARSE_CRED_STR
-; 出力: C_USER, C_PASS, C_ENPASS
+; 出力: C_USER, C_PASS, C_ENPASS, C_PROTO
 ; ==============================================================================
 :parse_cred_line
     C_USER = ''
     C_PASS = ''
     C_ENPASS = ''
+    C_PROTO = ''
 
     ; 1列目 (ユーザー名) の切り出し
     strscan PARSE_CRED_STR ','
@@ -1990,7 +2088,7 @@ return
         PARSE_CRED_STR = ''
     endif
 
-    ; 2列目 (パスワード) と 3列目 (管理者パスワード) の切り出し
+    ; 2列目 (パスワード) の切り出し
     strscan PARSE_CRED_STR ','
     if result = 0 then
         C_PASS = PARSE_CRED_STR
@@ -2007,9 +2105,31 @@ return
     PC_REM = result - PC_POS
     PC_START = PC_POS + 1
     if PC_REM > 0 then
-        strcopy PARSE_CRED_STR PC_START PC_REM C_ENPASS
+        strcopy PARSE_CRED_STR PC_START PC_REM PARSE_CRED_STR
+    else
+        PARSE_CRED_STR = ''
+    endif
+
+    ; 3列目 (管理者パスワード) と 4列目 (プロトコル) の切り出し
+    strscan PARSE_CRED_STR ','
+    if result = 0 then
+        C_ENPASS = PARSE_CRED_STR
+        goto parse_cred_assign
+    endif
+    PC_POS = result
+    PC_CUT = PC_POS - 1
+    if PC_CUT > 0 then
+        strcopy PARSE_CRED_STR 1 PC_CUT C_ENPASS
     else
         C_ENPASS = ''
+    endif
+    strlen PARSE_CRED_STR
+    PC_REM = result - PC_POS
+    PC_START = PC_POS + 1
+    if PC_REM > 0 then
+        strcopy PARSE_CRED_STR PC_START PC_REM C_PROTO
+    else
+        C_PROTO = ''
     endif
 
     :parse_cred_assign
@@ -2024,4 +2144,8 @@ return
     TRIM_VAL = C_ENPASS
     call trim_string
     C_ENPASS = TRIM_VAL
+
+    TRIM_VAL = C_PROTO
+    call trim_string
+    C_PROTO = TRIM_VAL
 return

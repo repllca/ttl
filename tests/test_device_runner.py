@@ -345,6 +345,23 @@ class TestCredentialQueueSubroutine(unittest.TestCase):
         self.assertEqual(self.engine.vars["C_USER"], "admin")
         self.assertEqual(self.engine.vars["C_PASS"], "Secret123")
         self.assertEqual(self.engine.vars["C_ENPASS"], "EnableSecret999")
+        self.assertEqual(self.engine.vars["C_PROTO"], "")
+
+        # 4 columns (user, pass, enpass, protocol)
+        self.engine.vars["PARSE_CRED_STR"] = " admin , Secret123 , EnableSecret999 , ssh "
+        self._call_subroutine("parse_cred_line")
+        self.assertEqual(self.engine.vars["C_USER"], "admin")
+        self.assertEqual(self.engine.vars["C_PASS"], "Secret123")
+        self.assertEqual(self.engine.vars["C_ENPASS"], "EnableSecret999")
+        self.assertEqual(self.engine.vars["C_PROTO"], "ssh")
+
+        # 4 columns with empty enpass and telnet
+        self.engine.vars["PARSE_CRED_STR"] = " operator , OpPass , , telnet "
+        self._call_subroutine("parse_cred_line")
+        self.assertEqual(self.engine.vars["C_USER"], "operator")
+        self.assertEqual(self.engine.vars["C_PASS"], "OpPass")
+        self.assertEqual(self.engine.vars["C_ENPASS"], "")
+        self.assertEqual(self.engine.vars["C_PROTO"], "telnet")
 
         # 2 columns (user, pass - enpass empty)
         self.engine.vars["PARSE_CRED_STR"] = "operator,OpPass"
