@@ -314,6 +314,21 @@ class TestEndToEndSimulation(unittest.TestCase):
             self.assertEqual(parts[1], "AUTO-NODE-01")
             self.assertEqual(parts[5], "OK")
             self.assertIn("Candidate #3", parts[6])
+            self.assertEqual(parts[7], "admin", "Auth_User column in summary CSV should record the logged-in user")
+
+            # Verify resolved_accounts_*.csv was created with logged-in user
+            resolved_files = glob.glob(os.path.join(logs_dir, "resolved_accounts_*.csv"))
+            self.assertGreater(len(resolved_files), 0, "resolved_accounts_*.csv should be created")
+            with open(resolved_files[-1], "r", encoding="utf-8") as f:
+                res_content = f.read()
+            self.assertIn("AUTO-NODE-01,192.168.10.1,admin,ssh,OK", res_content)
+
+            # Verify individual log contains the Logged-in User header
+            log_files = glob.glob(os.path.join(logs_dir, "AUTO-NODE-01_*.log"))
+            self.assertGreater(len(log_files), 0, "Device log file should be created")
+            with open(log_files[0], "r", encoding="utf-8") as f:
+                log_content = f.read()
+            self.assertIn("Logged-in User: admin", log_content)
         finally:
             if os.path.exists(temp_cred):
                 os.remove(temp_cred)

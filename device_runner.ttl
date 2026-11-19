@@ -309,8 +309,17 @@ if f_sum = -1 then
     endif
 endif
 ; サマリCSVのヘッダ行を出力
-filewriteln f_sum 'Timestamp,Hostname,IP,Protocol,Prompt,Status,Detail'
+filewriteln f_sum 'Timestamp,Hostname,IP,Protocol,Prompt,Status,Detail,Auth_User'
 fileclose f_sum
+
+; ログイン成功アカウント一覧CSVの準備 (どの機器にどのアカウントで入れたかを保存)
+sprintf '%s\resolved_accounts_%s.csv' LOG_DIR RUN_ID
+RESOLVED_FILE = inputstr
+fileopen f_res RESOLVED_FILE 0
+if f_res <> -1 then
+    filewriteln f_res 'Hostname,IP,User,Protocol,Status'
+    fileclose f_res
+endif
 
 
 ; ==============================================================================
@@ -1070,6 +1079,14 @@ logclose
 logopen LOG_FILE 0 0
 IS_LOG_OPEN = 1
 
+; ログの先頭にログイン成功アカウントと機器情報を記録
+logwrite #13#10
+logwrite '=================================================='#13#10
+sprintf '# Host: %s (%s) / Protocol: %s / Logged-in User: %s' DEV_NAME DEV_IP DEV_PROTO DEV_USER
+logwrite inputstr
+logwrite #13#10
+logwrite '=================================================='#13#10
+
 
 ; ==============================================================================
 ; 12. コマンドファイルの順次実行 (ページャー自動検知・スペース送信)
@@ -1240,14 +1257,22 @@ endif
 strcompare DEV_STATUS 'OK'
 if result = 0 then
     OK_COUNT = OK_COUNT + 1
+    ; ログイン成功時は解決済みアカウント一覧CSVに追記
+    fileopen f_res RESOLVED_FILE 1
+    if f_res <> -1 then
+        sprintf '%s,%s,%s,%s,%s' DEV_NAME DEV_IP DEV_USER DEV_PROTO DEV_STATUS
+        filewriteln f_res inputstr
+        fileclose f_res
+    endif
 else
     NG_COUNT = NG_COUNT + 1
+    DEV_USER = '-'
 endif
 
 getdate TS '%Y/%m/%d %H:%M:%S'
 fileopen f_sum SUMMARY_FILE 1
 if f_sum <> -1 then
-    sprintf '%s,%s,%s,%s,%s,%s,%s' TS DEV_NAME DEV_IP DEV_PROTO PROMPT_SYMBOL DEV_STATUS DEV_DETAIL
+    sprintf '%s,%s,%s,%s,%s,%s,%s,%s' TS DEV_NAME DEV_IP DEV_PROTO PROMPT_SYMBOL DEV_STATUS DEV_DETAIL DEV_USER
     filewriteln f_sum inputstr
     fileclose f_sum
 endif
