@@ -53,7 +53,7 @@ class TTLEngine:
         self.pc = 0
         self.instructions = []
         self.stream_buffer = ""
-        self.max_steps = 10000
+        self.max_steps = 50000
 
     def load_script(self, ttl_path):
         with open(ttl_path, "r", encoding="utf-8") as f:

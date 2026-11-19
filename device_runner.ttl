@@ -78,6 +78,16 @@ DEF_CMD_NAME   = 'commands_universal.txt' ; CSV側でコマンド未指定時の
 LOGIN_TIMEOUT  = 15                 ; 機器へのログイン応答を待つ最大秒数
 CMD_TIMEOUT    = 30                 ; 各コマンドの実行結果を待つ最大秒数
 
+; --- 全機器共通のフォールバック認証候補プール（オプション） ---
+; 【変更のポイント】
+; CSV側で指定したユーザー名・パスワードがすべて認証失敗した時、またはCSVで空欄の時に、
+; 追加で自動試行させたい (ユーザー名, パスワード) 候補があれば設定できます。
+; パイプ (|) または セミコロン (;) 区切りで複数指定可能です（空欄 '' の場合は試行しません）。
+; 例: GLOBAL_CRED_USERS  = 'admin|cisco|root'
+;     GLOBAL_CRED_PASSES = 'admin|cisco|default'
+GLOBAL_CRED_USERS  = ''
+GLOBAL_CRED_PASSES = ''
+
 
 ; ==============================================================================
 ; 3. ★【対話ポップアップ】(接続先・ファイル・フォルダの選択と入力)
@@ -414,25 +424,7 @@ if result = 0 then
     DEV_PROTO = 'ssh'
 endif
 
-; 3) ユーザー名未記載時: 踏み台サーバのユーザ名を流用
-strlen DEV_USER
-if result = 0 then
-    DEV_USER = BASTION_USER
-endif
-
-; 4) パスワード未記載時: 踏み台サーバのパスワードを流用
-strlen DEV_PASS
-if result = 0 then
-    DEV_PASS = BASTION_PASS
-endif
-
-; 5) 管理者(enable)パスワード未記載時: 通常パスワードを流用
-strlen DEV_ENPASS
-if result = 0 then
-    DEV_ENPASS = DEV_PASS
-endif
-
-; 6) コマンドファイル未指定時: 汎用コマンドファイル(commands_universal.txt)を使用
+; 3) コマンドファイル未指定時: 汎用コマンドファイル(commands_universal.txt)を使用
 strlen DEV_CMD
 if result = 0 then
     DEV_CMD = DEFAULT_CMD
@@ -459,15 +451,75 @@ PROMPT_SYMBOL = '?'
 IS_LOG_OPEN = 0
 IS_DEVICE_LOGGED_IN = 0
 
+; ------------------------------------------------------
+; ★【認証情報キューの初期化】 (複数ユーザー名・パスワード候補対応)
+;   CSVの「ユーザー名」「パスワード」列から候補を展開し、順番に試行できるようにキューを作成します。
+; ------------------------------------------------------
+REMAIN_USERS = DEV_USER
+REMAIN_PASS  = DEV_PASS
+LAST_USER    = ''
+LAST_PASS    = ''
+
+; ユーザー名・パスワードが共に空なら、踏み台の認証情報をデフォルト候補1として登録
+strlen REMAIN_USERS
+U_INIT_LEN = result
+strlen REMAIN_PASS
+P_INIT_LEN = result
+if U_INIT_LEN = 0 and P_INIT_LEN = 0 then
+    REMAIN_USERS = BASTION_USER
+    REMAIN_PASS  = BASTION_PASS
+endif
+
+; マクロ設定エリアでグローバル候補が指定されている場合はキュー末尾に連結
+strlen GLOBAL_CRED_USERS
+if result > 0 then
+    strlen REMAIN_USERS
+    if result > 0 then
+        strconcat REMAIN_USERS '|'
+        strconcat REMAIN_USERS GLOBAL_CRED_USERS
+    else
+        REMAIN_USERS = GLOBAL_CRED_USERS
+    endif
+endif
+
+strlen GLOBAL_CRED_PASSES
+if result > 0 then
+    strlen REMAIN_PASS
+    if result > 0 then
+        strconcat REMAIN_PASS '|'
+        strconcat REMAIN_PASS GLOBAL_CRED_PASSES
+    else
+        REMAIN_PASS = GLOBAL_CRED_PASSES
+    endif
+endif
+
+AUTH_ATTEMPT = 0
+
 
 ; ==============================================================================
-; 7. 踏み台から対象機器への接続コマンド発行 (SSH / Telnet + 踏み台復帰マーカー)
+; 7. 対象機器への接続試行ループ (複数候補の順次トライ & 踏み台復帰マーカー)
 ; ==============================================================================
 ; 【重要設計】
-;   コマンド末尾に `; echo "__BAS""TION_RETURN__"` を付与して実行します。
-;   これにより、接続失敗時やログアウト時にSSH/Telnetが終了して踏み台に戻った瞬間、
-;   必ず `__BASTION_RETURN__` が出力され、踏み台と対象機器を100%確実に区別できます。
+;   複数の認証情報（例: admin/Pass1 -> operator/Pass2 -> root/Pass3）が指定されている場合、
+;   1つ目が認証失敗しても踏み台セッションを維持したまま、次の候補で自動的に再接続します。
+;   コマンド末尾の `; echo "__BAS""TION_RETURN__"` により、踏み台への余分な exit を完全防止します。
 ; ==============================================================================
+:try_next_credential
+; 認証情報キューから次の (ユーザー名, パスワード) 候補を取り出し
+call pop_next_credential
+if HAS_CRED = 0 then
+    ; すべての候補を試行して全滅した場合
+    DEV_STATUS = 'NG'
+    if AUTH_ATTEMPT > 1 then
+        sprintf 'All %d Auth Attempts Failed' AUTH_ATTEMPT
+        DEV_DETAIL = inputstr
+    endif
+    goto record_result
+endif
+
+AUTH_ATTEMPT = AUTH_ATTEMPT + 1
+ACTIVE_USER = CURR_USER
+ACTIVE_PASS = CURR_PASS
 
 ; 接続前に受信バッファの残存データを完全クリア
 flushrecv
@@ -480,9 +532,9 @@ if result = 0 goto do_telnet
 ; --- SSH接続コマンド発行 ---
 sprintf 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null %s ' SSH_EXTRA_OPTS
 SEND_CMD = inputstr
-strlen DEV_USER
+strlen ACTIVE_USER
 if result > 0 then
-    strconcat SEND_CMD DEV_USER
+    strconcat SEND_CMD ACTIVE_USER
     strconcat SEND_CMD '@'
 endif
 strconcat SEND_CMD DEV_IP
@@ -525,20 +577,20 @@ endif
 
 if result = 2 or result = 3 then
     ; ユーザー名入力要求 (login: / Username:)
-    sendln DEV_USER
+    sendln ACTIVE_USER
     goto login_stage1_loop
 endif
 
 if result = 4 then
     ; パスワード入力要求 (Password:) -> パスワードを送信して【第2段階】へ進む
-    sendln DEV_PASS
+    sendln ACTIVE_PASS
     goto login_stage2_wait
 endif
 
 if result = 5 then
-    ; SSH/Telnetが即座に終了して踏み台に戻った（接続拒否・ホスト不在・名前解決失敗等）
-    DEV_DETAIL = 'Connection Failed / Unreachable'
-    goto record_result
+    ; SSH/Telnetが即座に終了して踏み台に戻った（接続拒否・ホスト不在・認証失敗等）
+    DEV_DETAIL = 'Connection Failed / Closed by Host'
+    goto check_next_credential
 endif
 
 if result = 6 or result = 7 then
@@ -570,12 +622,12 @@ if result = 0 then
         goto login_success_exit
     endif
     if result = 6 then
-        sendln DEV_PASS
+        sendln ACTIVE_PASS
         goto login_stage2_wait
     endif
     if result = 7 then
         DEV_DETAIL = 'Connection Timed Out'
-        goto record_result
+        goto check_next_credential
     endif
 
     ; 応答がないため Ctrl+C (#3) で接続試行を中断し、踏み台へ安全に復帰
@@ -585,13 +637,13 @@ if result = 0 then
     timeout = 5
     wait '__BASTION_RETURN__'
     DEV_DETAIL = 'Login Timeout'
-    goto record_result
+    goto check_next_credential
 endif
 
 ; ------------------------------------------------------
 ; 【第2段階】パスワード送信後のプロンプト待機
 ;   パスワード送信後にもう一度 Password: や login: や denied が返ってきた場合は、
-;   「パスワード誤り」と即座に判定して中断します（アカウントロック＆無限ループ防止）。
+;   「パスワード誤り」と判定し、別候補があれば次の候補を試行します。
 ; ------------------------------------------------------
 :login_stage2_wait
 timeout = LOGIN_TIMEOUT
@@ -615,13 +667,13 @@ if result >= 6 and result <= 8 then
     timeout = 5
     wait '__BASTION_RETURN__'
     DEV_DETAIL = 'Auth Failed (Wrong Password)'
-    goto record_result
+    goto check_next_credential
 endif
 
 if result = 9 then
     ; パスワード送信直後に切断されて踏み台へ戻った
     DEV_DETAIL = 'Auth Rejected / Closed by Host'
-    goto record_result
+    goto check_next_credential
 endif
 
 if result = 10 then
@@ -632,7 +684,7 @@ if result = 10 then
     timeout = 5
     wait '__BASTION_RETURN__'
     DEV_DETAIL = 'Auth Failed (Permission Denied)'
-    goto record_result
+    goto check_next_credential
 endif
 
 if result = 0 then
@@ -653,13 +705,48 @@ if result = 0 then
     timeout = 5
     wait '__BASTION_RETURN__'
     DEV_DETAIL = 'Post-Auth Timeout'
-    goto record_result
+    goto check_next_credential
 endif
+
+; ------------------------------------------------------
+; ★【認証失敗時の次候補判定】
+;   認証失敗を検知した際、未試行のユーザー名・パスワード候補が残っていれば
+;   踏み台プロンプトから次の候補で再接続を試行します。
+; ------------------------------------------------------
+:check_next_credential
+strlen REMAIN_USERS
+REM_U_LEN = result
+strlen REMAIN_PASS
+REM_P_LEN = result
+
+if REM_U_LEN > 0 or REM_P_LEN > 0 then
+    mpause 300
+    flushrecv
+    goto try_next_credential
+endif
+
+; すべての認証候補が尽きた場合はNGとして結果記録へ
+DEV_STATUS = 'NG'
+if AUTH_ATTEMPT > 1 then
+    sprintf 'All %d Auth Attempts Failed' AUTH_ATTEMPT
+    DEV_DETAIL = inputstr
+endif
+goto record_result
 
 :login_success_exit
 if LOGIN_SUCCESS = 0 then
     DEV_DETAIL = 'Login Failed'
     goto cleanup_device
+endif
+
+; 認証に成功したユーザー名・パスワードを変数に確定
+DEV_USER = ACTIVE_USER
+DEV_PASS = ACTIVE_PASS
+
+; 管理者(enable)パスワード未記載時は、認証成功した通常パスワードを流用
+strlen DEV_ENPASS
+if result = 0 then
+    DEV_ENPASS = ACTIVE_PASS
 endif
 
 
@@ -855,7 +942,12 @@ goto read_cmd_loop
 :end_cmd_loop
 fileclose f_cmd
 DEV_STATUS = 'OK'
-DEV_DETAIL = 'Success'
+if AUTH_ATTEMPT > 1 then
+    sprintf 'Success (Candidate #%d matched)' AUTH_ATTEMPT
+    DEV_DETAIL = inputstr
+else
+    DEV_DETAIL = 'Success'
+endif
 
 
 ; ==============================================================================
@@ -1195,4 +1287,177 @@ return
     goto trim_tail_str_loop
 
     :trim_str_done
+return
+
+
+; ==============================================================================
+; サブルーチン3: 認証情報キューから次の (ユーザー名, パスワード) ペアを取り出す
+; 入力: REMAIN_USERS, REMAIN_PASS, LAST_USER, LAST_PASS
+; 出力: CURR_USER, CURR_PASS, LAST_USER, LAST_PASS, HAS_CRED (0:なし, 1:あり)
+; ==============================================================================
+:pop_next_credential
+    HAS_CRED = 0
+    NEXT_U = ''
+    NEXT_P = ''
+
+    ; --- ユーザー名キューから1件取り出し ---
+    strlen REMAIN_USERS
+    if result > 0 then
+        strscan REMAIN_USERS '|'
+        if result = 0 then
+            strscan REMAIN_USERS ';'
+        endif
+        if result > 0 then
+            POP_POS = result
+            POP_CUT = POP_POS - 1
+            if POP_CUT > 0 then
+                strcopy REMAIN_USERS 1 POP_CUT NEXT_U
+            else
+                NEXT_U = ''
+            endif
+            strlen REMAIN_USERS
+            POP_REM = result - POP_POS
+            POP_START = POP_POS + 1
+            if POP_REM > 0 then
+                strcopy REMAIN_USERS POP_START POP_REM REMAIN_USERS
+            else
+                REMAIN_USERS = ''
+            endif
+        else
+            NEXT_U = REMAIN_USERS
+            REMAIN_USERS = ''
+        endif
+    endif
+
+    ; --- パスワードキューから1件取り出し ---
+    strlen REMAIN_PASS
+    if result > 0 then
+        strscan REMAIN_PASS '|'
+        if result = 0 then
+            strscan REMAIN_PASS ';'
+        endif
+        if result > 0 then
+            POP_POS = result
+            POP_CUT = POP_POS - 1
+            if POP_CUT > 0 then
+                strcopy REMAIN_PASS 1 POP_CUT NEXT_P
+            else
+                NEXT_P = ''
+            endif
+            strlen REMAIN_PASS
+            POP_REM = result - POP_POS
+            POP_START = POP_POS + 1
+            if POP_REM > 0 then
+                strcopy REMAIN_PASS POP_START POP_REM REMAIN_PASS
+            else
+                REMAIN_PASS = ''
+            endif
+        else
+            NEXT_P = REMAIN_PASS
+            REMAIN_PASS = ''
+        endif
+    endif
+
+    ; トリム処理
+    TRIM_VAL = NEXT_U
+    call trim_string
+    NEXT_U = TRIM_VAL
+
+    TRIM_VAL = NEXT_P
+    call trim_string
+    NEXT_P = TRIM_VAL
+
+    ; ユーザー名・パスワードが共に空なら候補終了
+    strlen NEXT_U
+    U_LEN = result
+    strlen NEXT_P
+    P_LEN = result
+    if U_LEN = 0 and P_LEN = 0 then
+        HAS_CRED = 0
+        return
+    endif
+
+    ; NEXT_U 内に "user:pass" または "user/pass" 形式のペアが含まれているか判定
+    HAS_PAIR = 0
+    strscan NEXT_U ':'
+    if result > 0 then
+        POP_POS = result
+        POP_CUT = POP_POS - 1
+        if POP_CUT > 0 then
+            strcopy NEXT_U 1 POP_CUT CURR_USER
+        else
+            CURR_USER = ''
+        endif
+        strlen NEXT_U
+        POP_REM = result - POP_POS
+        POP_START = POP_POS + 1
+        if POP_REM > 0 then
+            strcopy NEXT_U POP_START POP_REM CURR_PASS
+        else
+            CURR_PASS = ''
+        endif
+        HAS_PAIR = 1
+    else
+        strscan NEXT_U '/'
+        if result > 0 then
+            POP_POS = result
+            POP_CUT = POP_POS - 1
+            if POP_CUT > 0 then
+                strcopy NEXT_U 1 POP_CUT CURR_USER
+            else
+                CURR_USER = ''
+            endif
+            strlen NEXT_U
+            POP_REM = result - POP_POS
+            POP_START = POP_POS + 1
+            if POP_REM > 0 then
+                strcopy NEXT_U POP_START POP_REM CURR_PASS
+            else
+                CURR_PASS = ''
+            endif
+            HAS_PAIR = 1
+        endif
+    endif
+
+    if HAS_PAIR = 0 then
+        CURR_USER = NEXT_U
+        CURR_PASS = NEXT_P
+    endif
+
+    ; 各要素のトリム
+    TRIM_VAL = CURR_USER
+    call trim_string
+    CURR_USER = TRIM_VAL
+
+    TRIM_VAL = CURR_PASS
+    call trim_string
+    CURR_PASS = TRIM_VAL
+
+    ; ユーザー名が未指定の場合は前回のユーザー名を流用（初回なら踏み台ユーザー名）
+    strlen CURR_USER
+    if result = 0 then
+        strlen LAST_USER
+        if result > 0 then
+            CURR_USER = LAST_USER
+        else
+            CURR_USER = BASTION_USER
+        endif
+    else
+        LAST_USER = CURR_USER
+    endif
+
+    ; パスワードが未指定の場合は前回のパスワードを流用（初回なら踏み台パスワード）
+    strlen CURR_PASS
+    if result = 0 then
+        strlen LAST_PASS
+        if result > 0 then
+            CURR_PASS = LAST_PASS
+        else
+            CURR_PASS = BASTION_PASS
+        endif
+    else
+        LAST_PASS = CURR_PASS
+    endif
+
+    HAS_CRED = 1
 return

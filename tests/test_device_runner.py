@@ -236,5 +236,108 @@ class TestMultiVendorAdaptiveLogic(unittest.TestCase):
         self.assertTrue(matched)
 
 
+class TestCredentialQueueSubroutine(unittest.TestCase):
+    """Directly execute pop_next_credential subroutine in TTL to verify candidate token extraction."""
+
+    def setUp(self):
+        from tests.mock_lab import MockSession
+        from tests.ttl_engine import TTLEngine
+        self.session = MockSession()
+        self.engine = TTLEngine(WORKSPACE_DIR, self.session)
+        self.engine.load_script(TTL_FILE)
+
+    def _call_subroutine(self, sub_name):
+        self.engine.call_stack.append(len(self.engine.instructions))  # return to EOF
+        self.engine.pc = self.engine.labels[sub_name]
+        steps = 0
+        while self.engine.pc < len(self.engine.instructions) and steps < 500:
+            steps += 1
+            line_num, code = self.engine.instructions[self.engine.pc]
+            if not code or code.startswith(":"):
+                self.engine.pc += 1
+                continue
+            self.engine._execute_line(line_num, code)
+            if not self.engine.call_stack:
+                break
+
+    def test_pop_pipe_parallel_credentials(self):
+        self.engine.vars["REMAIN_USERS"] = "userA|userB"
+        self.engine.vars["REMAIN_PASS"] = "passA|passB"
+        self.engine.vars["LAST_USER"] = ""
+        self.engine.vars["LAST_PASS"] = ""
+        self.engine.vars["BASTION_USER"] = "b_user"
+        self.engine.vars["BASTION_PASS"] = "b_pass"
+
+        # Pop 1
+        self._call_subroutine("pop_next_credential")
+        self.assertEqual(self.engine.vars["HAS_CRED"], 1)
+        self.assertEqual(self.engine.vars["CURR_USER"], "userA")
+        self.assertEqual(self.engine.vars["CURR_PASS"], "passA")
+
+        # Pop 2
+        self._call_subroutine("pop_next_credential")
+        self.assertEqual(self.engine.vars["HAS_CRED"], 1)
+        self.assertEqual(self.engine.vars["CURR_USER"], "userB")
+        self.assertEqual(self.engine.vars["CURR_PASS"], "passB")
+
+        # Pop 3 (exhausted)
+        self._call_subroutine("pop_next_credential")
+        self.assertEqual(self.engine.vars["HAS_CRED"], 0)
+
+    def test_pop_colon_combined_credentials(self):
+        self.engine.vars["REMAIN_USERS"] = "admin:Secret1|operator:Secret2"
+        self.engine.vars["REMAIN_PASS"] = ""
+        self.engine.vars["LAST_USER"] = ""
+        self.engine.vars["LAST_PASS"] = ""
+        self.engine.vars["BASTION_USER"] = "b_user"
+        self.engine.vars["BASTION_PASS"] = "b_pass"
+
+        # Pop 1
+        self._call_subroutine("pop_next_credential")
+        self.assertEqual(self.engine.vars["HAS_CRED"], 1)
+        self.assertEqual(self.engine.vars["CURR_USER"], "admin")
+        self.assertEqual(self.engine.vars["CURR_PASS"], "Secret1")
+
+        # Pop 2
+        self._call_subroutine("pop_next_credential")
+        self.assertEqual(self.engine.vars["HAS_CRED"], 1)
+        self.assertEqual(self.engine.vars["CURR_USER"], "operator")
+        self.assertEqual(self.engine.vars["CURR_PASS"], "Secret2")
+
+        # Pop 3 (exhausted)
+        self._call_subroutine("pop_next_credential")
+        self.assertEqual(self.engine.vars["HAS_CRED"], 0)
+
+    def test_pop_single_user_multiple_passwords(self):
+        self.engine.vars["REMAIN_USERS"] = "admin"
+        self.engine.vars["REMAIN_PASS"] = "pw1|pw2|pw3"
+        self.engine.vars["LAST_USER"] = ""
+        self.engine.vars["LAST_PASS"] = ""
+        self.engine.vars["BASTION_USER"] = "b_user"
+        self.engine.vars["BASTION_PASS"] = "b_pass"
+
+        # Pop 1
+        self._call_subroutine("pop_next_credential")
+        self.assertEqual(self.engine.vars["HAS_CRED"], 1)
+        self.assertEqual(self.engine.vars["CURR_USER"], "admin")
+        self.assertEqual(self.engine.vars["CURR_PASS"], "pw1")
+
+        # Pop 2 (admin reused)
+        self._call_subroutine("pop_next_credential")
+        self.assertEqual(self.engine.vars["HAS_CRED"], 1)
+        self.assertEqual(self.engine.vars["CURR_USER"], "admin")
+        self.assertEqual(self.engine.vars["CURR_PASS"], "pw2")
+
+        # Pop 3 (admin reused)
+        self._call_subroutine("pop_next_credential")
+        self.assertEqual(self.engine.vars["HAS_CRED"], 1)
+        self.assertEqual(self.engine.vars["CURR_USER"], "admin")
+        self.assertEqual(self.engine.vars["CURR_PASS"], "pw3")
+
+        # Pop 4 (exhausted)
+        self._call_subroutine("pop_next_credential")
+        self.assertEqual(self.engine.vars["HAS_CRED"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

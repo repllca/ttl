@@ -110,11 +110,13 @@ class MockSession:
 
         # Handling login prompts
         if dstate == "LOGIN_USER":
+            if cmd in ("wrong_user", "bad_user"):
+                device["bad_user"] = True
             device["state"] = "LOGIN_PASS"
             return "Password: "
 
         if dstate == "LOGIN_PASS":
-            if cmd == "WRONG_PASS":
+            if cmd.startswith("WRONG") or cmd.startswith("bad_") or device.get("bad_user"):
                 device["fail_count"] = device.get("fail_count", 0) + 1
                 if device["fail_count"] >= 3:
                     self.state = "BASTION"
@@ -248,6 +250,8 @@ class MockSession:
             "type": dtype,
             "ip": ip,
             "proto": proto,
+            "user": user,
+            "bad_user": user in ("wrong_user", "bad_user"),
             "mode": "user",
             "state": "LOGIN_PASS" if proto == "ssh" else "LOGIN_USER",
             "paging": False,
