@@ -125,6 +125,9 @@ class MockSession:
             return self._finish_login(device)
 
         if dstate == "ENABLE_PASS":
+            if dtype == "cisco_drop_enable":
+                self.state = "BASTION"
+                return "\r\nConnection to 192.168.10.250 closed by foreign host.\r\n" + self._bastion_return_str()
             if dtype == "cisco":
                 device["mode"] = "privileged"
                 device["state"] = "READY"
@@ -156,7 +159,7 @@ class MockSession:
 
             # enable command
             if cmd == "enable":
-                if dtype == "cisco":
+                if dtype in ("cisco", "cisco_drop_enable"):
                     device["state"] = "ENABLE_PASS"
                     return "Password: "
                 elif dtype == "yamaha":
@@ -233,7 +236,9 @@ class MockSession:
 
         self.state = "DEVICE"
         # Determine device type by IP
-        if ip == "192.168.10.1":
+        if ip == "192.168.10.250":
+            dtype = "cisco_drop_enable"
+        elif ip == "192.168.10.1":
             dtype = "cisco"
         elif ip == "192.168.10.2":
             dtype = "yamaha"

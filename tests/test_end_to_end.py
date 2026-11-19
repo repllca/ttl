@@ -335,6 +335,44 @@ class TestEndToEndSimulation(unittest.TestCase):
             if os.path.exists(temp_dev):
                 os.remove(temp_dev)
 
+    def test_enable_disconnect_resilience(self):
+        """Verify that when a target device drops during enable password escalation,
+        the macro does not crash on sendln and safely returns to bastion with error recorded."""
+        temp_dev = os.path.join(WORKSPACE_DIR, "temp_dev_drop_enable.csv")
+        try:
+            with open(temp_dev, "w", encoding="utf-8") as f:
+                f.write("Hostname,IP,Username,Password,EnablePassword,Protocol,CommandFile\n")
+                f.write("DROP-ENABLE-01,192.168.10.250,admin,cisco,cisco,ssh,commands_cisco.txt\n")
+
+            logs_dir = os.path.join(WORKSPACE_DIR, "logs")
+            if os.path.exists(logs_dir):
+                import shutil
+                shutil.rmtree(logs_dir)
+
+            session = MockSession()
+            engine = TTLEngine(
+                WORKSPACE_DIR,
+                session,
+                params=["device_runner.ttl", "logs", "mock_pass", temp_dev]
+            )
+            engine.load_script(TTL_FILE)
+            engine.run()
+
+            summary_files = glob.glob(os.path.join(logs_dir, "summary_*.csv"))
+            self.assertGreater(len(summary_files), 0)
+            with open(summary_files[-1], "r", encoding="utf-8") as f:
+                content = f.read()
+
+            lines = [l for l in content.splitlines() if l.strip() and not l.startswith("Timestamp")]
+            self.assertEqual(len(lines), 1)
+            parts = lines[0].split(",")
+            self.assertEqual(parts[1], "DROP-ENABLE-01")
+            self.assertEqual(parts[5], "NG")
+            self.assertIn("Disconnected During Enable", parts[6])
+        finally:
+            if os.path.exists(temp_dev):
+                os.remove(temp_dev)
+
 
 if __name__ == "__main__":
     unittest.main()

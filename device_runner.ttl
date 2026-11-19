@@ -410,26 +410,7 @@ endif
 :read_csv_loop
 ; 踏み台との通信セッションが正常に継続しているかチェック (2 = 正常接続中)
 testlink
-if result <> 2 then
-    sprintf '【踏み台サーバとの接続が切断されました】\n\n'
-    ERROR_MSG = inputstr
-    sprintf '■ 発生箇所:\n  直前に処理していた機器: %s (IP: %s)\n  プロトコル: %s / ステータス: %s (%s)\n\n' DEV_NAME DEV_IP DEV_PROTO DEV_STATUS DEV_DETAIL
-    strconcat ERROR_MSG inputstr
-    strconcat ERROR_MSG '--------------------------------------------------\n'
-    strconcat ERROR_MSG '【確認・対処いただきたいポイント】\n\n'
-    strconcat ERROR_MSG '1. 対象機器のIPアドレス・稼働状態の確認\n'
-    sprintf '   %s (%s) が実在し、踏み台から接続可能か確認してください。\n\n' DEV_NAME DEV_IP
-    strconcat ERROR_MSG inputstr
-    strconcat ERROR_MSG '2. 踏み台サーバ側のタイムアウト設定 (TMOUT)\n'
-    strconcat ERROR_MSG '   踏み台側の環境変数 TMOUT 等で自動切断されていないかご確認ください。\n'
-    strconcat ERROR_MSG '--------------------------------------------------\n'
-    sprintf '※切断前までの結果は以下に保存されています:\n%s' SUMMARY_FILE
-    strconcat ERROR_MSG inputstr
-
-    messagebox ERROR_MSG '通信切断エラー (原因と対処方法)'
-    fileclose f_csv
-    end
-endif
+if result <> 2 goto bastion_disconnected
 
 ; 機器一覧CSVから1行読み込み
 filereadln f_csv line
@@ -794,28 +775,34 @@ endif
 
 if result = 0 then
     ; タイムアウト時: 公開鍵認証等でパスワードなしログイン済みか、バナーでEnter待ちの可能性
+    testlink
+    if result <> 2 goto bastion_disconnected
     sendln ''
     timeout = 5
-    ; 1:>, 2:#, 3:$, 4:%, 5:], 6:assword:, 7:__BASTION_RETURN__
-    wait '>' '#' '$' '%' ']' 'assword:' '__BASTION_RETURN__'
-    if result >= 1 and result <= 5 then
+    ; 1:__BASTION_RETURN__, 2:>, 3:#, 4:$, 5:%, 6:], 7:assword:
+    wait '__BASTION_RETURN__' '>' '#' '$' '%' ']' 'assword:'
+    if result = 1 then
+        DEV_DETAIL = 'Connection Timed Out / Closed'
+        goto check_next_credential
+    endif
+    if result >= 2 and result <= 6 then
         LOGIN_SUCCESS = 1
-        INIT_PROMPT_IDX = result
+        INIT_PROMPT_IDX = result - 1
         IS_DEVICE_LOGGED_IN = 1
         goto login_success_exit
     endif
-    if result = 6 then
+    if result = 7 then
+        testlink
+        if result <> 2 goto bastion_disconnected
         sendln ACTIVE_PASS
         goto login_stage2_wait
-    endif
-    if result = 7 then
-        DEV_DETAIL = 'Connection Timed Out'
-        goto check_next_credential
     endif
 
     ; 応答がないため Ctrl+C (#3) で接続試行を中断し、踏み台へ安全に復帰
     send #3
     mpause 300
+    testlink
+    if result <> 2 goto bastion_disconnected
     sendln 'echo "__BAS""TION_RETURN__"'
     timeout = 5
     wait '__BASTION_RETURN__'
@@ -827,25 +814,35 @@ endif
 ; 【第2段階】パスワード送信後のプロンプト待機
 ;   パスワード送信後にもう一度 Password: や login: や denied が返ってきた場合は、
 ;   「パスワード誤り」と判定し、別候補があれば次の候補を試行します。
+;   ★重要: 踏み台復帰マーカー '__BASTION_RETURN__' を第1引数に配置することで、
+;   切断後の踏み台プロンプト記号 ($, >, ]) による誤った「ログイン成功」判定を100%防止します。
 ; ------------------------------------------------------
 :login_stage2_wait
 timeout = LOGIN_TIMEOUT
 ; wait引数(10個):
-; 1:>, 2:#, 3:$, 4:%, 5:], 6:assword:, 7:ogin:, 8:ser:, 9:__BASTION_RETURN__, 10:denied
-wait '>' '#' '$' '%' ']' 'assword:' 'ogin:' 'ser:' '__BASTION_RETURN__' 'denied'
+; 1:__BASTION_RETURN__, 2:>, 3:#, 4:$, 5:%, 6:], 7:assword:, 8:ogin:, 9:ser:, 10:denied
+wait '__BASTION_RETURN__' '>' '#' '$' '%' ']' 'assword:' 'ogin:' 'ser:' 'denied'
 
-if result >= 1 and result <= 5 then
+if result = 1 then
+    ; パスワード送信直後に切断されて踏み台へ戻った
+    DEV_DETAIL = 'Auth Rejected / Closed by Host'
+    goto check_next_credential
+endif
+
+if result >= 2 and result <= 6 then
     ; ログイン成功！対象機器のプロンプトに到達
     LOGIN_SUCCESS = 1
-    INIT_PROMPT_IDX = result
+    INIT_PROMPT_IDX = result - 1
     IS_DEVICE_LOGGED_IN = 1
     goto login_success_exit
 endif
 
-if result >= 6 and result <= 8 then
+if result >= 7 and result <= 9 then
     ; パスワード送信後に再度パスワード/ログイン要求が出た＝パスワード誤り
     send #3
     mpause 300
+    testlink
+    if result <> 2 goto bastion_disconnected
     sendln 'echo "__BAS""TION_RETURN__"'
     timeout = 5
     wait '__BASTION_RETURN__'
@@ -853,16 +850,12 @@ if result >= 6 and result <= 8 then
     goto check_next_credential
 endif
 
-if result = 9 then
-    ; パスワード送信直後に切断されて踏み台へ戻った
-    DEV_DETAIL = 'Auth Rejected / Closed by Host'
-    goto check_next_credential
-endif
-
 if result = 10 then
     ; Permission denied / Access denied
     send #3
     mpause 300
+    testlink
+    if result <> 2 goto bastion_disconnected
     sendln 'echo "__BAS""TION_RETURN__"'
     timeout = 5
     wait '__BASTION_RETURN__'
@@ -872,18 +865,27 @@ endif
 
 if result = 0 then
     ; パスワード送信後にタイムアウトした場合、Enterを1回送って再確認
+    testlink
+    if result <> 2 goto bastion_disconnected
     sendln ''
     timeout = 5
-    wait '>' '#' '$' '%' ']' '__BASTION_RETURN__'
-    if result >= 1 and result <= 5 then
+    ; 1:__BASTION_RETURN__, 2:>, 3:#, 4:$, 5:%, 6:]
+    wait '__BASTION_RETURN__' '>' '#' '$' '%' ']'
+    if result = 1 then
+        DEV_DETAIL = 'Auth Rejected / Closed by Host'
+        goto check_next_credential
+    endif
+    if result >= 2 and result <= 6 then
         LOGIN_SUCCESS = 1
-        INIT_PROMPT_IDX = result
+        INIT_PROMPT_IDX = result - 1
         IS_DEVICE_LOGGED_IN = 1
         goto login_success_exit
     endif
 
     send #3
     mpause 300
+    testlink
+    if result <> 2 goto bastion_disconnected
     sendln 'echo "__BAS""TION_RETURN__"'
     timeout = 5
     wait '__BASTION_RETURN__'
@@ -967,26 +969,64 @@ endif
 ; 初期プロンプトが既に特権(#, ], $, %)の場合は昇格処理をスキップ
 if INIT_PROMPT_IDX >= 2 and INIT_PROMPT_IDX <= 5 goto disable_paging
 
+; 踏み台との通信セッションが正常に継続しているかチェック
+testlink
+if result <> 2 goto bastion_disconnected
+
 ; 初期プロンプトが一般モード (>) の場合のみ特権昇格を試行
 sendln 'enable'
 timeout = 5
-; 引数1:assword:, 2:#, 3:], 4:Invalid, 5:Unknown, 6:not found, 7:Error, 8:syntax, 9:>, 10:$
-wait 'assword:' '#' ']' 'Invalid' 'Unknown' 'not found' 'Error' 'syntax' '>' '$'
+; 引数1:__BASTION_RETURN__, 2:assword:, 3:#, 4:], 5:Invalid, 6:Unknown, 7:not found, 8:Error, 9:syntax, 10:>
+wait '__BASTION_RETURN__' 'assword:' '#' ']' 'Invalid' 'Unknown' 'not found' 'Error' 'syntax' '>'
 
 if result = 1 then
+    ; 昇格試行中に相手機器から切断されて踏み台に戻った場合
+    IS_DEVICE_LOGGED_IN = 0
+    DEV_STATUS = 'NG'
+    DEV_DETAIL = 'Disconnected During Enable'
+    goto cleanup_done
+elseif result = 2 then
     ; Cisco等: 管理者パスワード入力要求
+    testlink
+    if result <> 2 goto bastion_disconnected
     sendln DEV_ENPASS
     timeout = 5
-    wait '#' ']' '>' '$'
-elseif result >= 4 and result <= 8 then
+    ; 1:__BASTION_RETURN__, 2:#, 3:], 4:>, 5:assword:, 6:denied, 7:Bad
+    wait '__BASTION_RETURN__' '#' ']' '>' 'assword:' 'denied' 'Bad'
+    if result = 1 then
+        IS_DEVICE_LOGGED_IN = 0
+        DEV_STATUS = 'NG'
+        DEV_DETAIL = 'Disconnected During Enable Password'
+        goto cleanup_done
+    elseif result >= 5 and result <= 7 then
+        ; 管理者パスワード誤り
+        DEV_DETAIL = 'Enable Password Failed'
+    endif
+elseif result >= 5 and result <= 9 then
     ; enable コマンドが拒否された場合 (Yamahaルータ等の可能性があるため administrator を試行)
+    testlink
+    if result <> 2 goto bastion_disconnected
     sendln 'administrator'
     timeout = 5
-    wait 'assword:' '#' '>' '$'
+    ; 1:__BASTION_RETURN__, 2:assword:, 3:#, 4:>, 5:$
+    wait '__BASTION_RETURN__' 'assword:' '#' '>' '$'
     if result = 1 then
+        IS_DEVICE_LOGGED_IN = 0
+        DEV_STATUS = 'NG'
+        DEV_DETAIL = 'Disconnected During Administrator Cmd'
+        goto cleanup_done
+    elseif result = 2 then
+        testlink
+        if result <> 2 goto bastion_disconnected
         sendln DEV_ENPASS
         timeout = 5
-        wait '#' '>' '$'
+        wait '__BASTION_RETURN__' '#' '>' '$'
+        if result = 1 then
+            IS_DEVICE_LOGGED_IN = 0
+            DEV_STATUS = 'NG'
+            DEV_DETAIL = 'Disconnected During Administrator Password'
+            goto cleanup_done
+        endif
     endif
 endif
 
@@ -996,6 +1036,8 @@ endif
 ; ==============================================================================
 ; 【変更のポイント】新しい機種に対応させたい場合は、ここにページング無効化コマンドを追加できます。
 :disable_paging
+testlink
+if result <> 2 goto bastion_disconnected
 timeout = 2
 
 ; Cisco / Allied Telesis / Alaxala / Fortinet 用
@@ -1124,6 +1166,8 @@ logwrite ' ] ===================='
 logwrite #13#10
 
 ; コマンドを機器に送信
+testlink
+if result <> 2 goto bastion_disconnected
 sendln cmd_line
 
 ; コマンド実行結果の待機ループ (ページング表示 --More-- の自動解除 & 途中切断検知)
@@ -1308,6 +1352,42 @@ if paramcnt < 3 then
         messagebox inputstr 'ログ収集完了 (要確認あり)'
     endif
 endif
+end
+
+
+; ==============================================================================
+; 【異常系ハンドラ】踏み台サーバとの通信セッション切断時
+; ==============================================================================
+:bastion_disconnected
+if IS_LOG_OPEN = 1 then
+    logclose
+    IS_LOG_OPEN = 0
+endif
+if F_CRED_OPEN = 1 then
+    fileclose f_cred
+    F_CRED_OPEN = 0
+endif
+fileclose f_csv
+
+sprintf '【踏み台サーバとの接続が切断されました】\n\n'
+ERROR_MSG = inputstr
+sprintf '■ 発生状況:\n  処理中だった機器: %s (IP: %s)\n  プロトコル: %s / ステータス: %s (%s)\n\n' DEV_NAME DEV_IP DEV_PROTO DEV_STATUS DEV_DETAIL
+strconcat ERROR_MSG inputstr
+strconcat ERROR_MSG '--------------------------------------------------\n'
+strconcat ERROR_MSG '【エラーの原因と確認・対処いただきたいポイント】\n\n'
+strconcat ERROR_MSG '1. 踏み台サーバ側の自動切断設定 (TMOUT / ClientAlive)\n'
+strconcat ERROR_MSG '   踏み台サーバ側の環境変数 TMOUT や sshd の ClientAliveInterval により\n'
+strconcat ERROR_MSG '   無通信または応答待ち中にセッションが切断された可能性があります。\n\n'
+strconcat ERROR_MSG '2. 対象機器へのSSH/Telnet切断時の巻き添え\n'
+strconcat ERROR_MSG '   対象機器への接続が切断または拒否された際、踏み台側の接続が\n'
+strconcat ERROR_MSG '   維持されているかご確認ください。\n\n'
+strconcat ERROR_MSG '3. 踏み台・ネットワーク経路の健全性\n'
+strconcat ERROR_MSG '   PCから踏み台サーバへのネットワーク・VPN接続が切れていないか確認してください。\n'
+strconcat ERROR_MSG '--------------------------------------------------\n'
+sprintf '※切断直前までの実行結果は以下に保存されています:\n%s' SUMMARY_FILE
+strconcat ERROR_MSG inputstr
+
+messagebox ERROR_MSG '踏み台通信切断エラー (原因と対処方法)'
 end
 
 
