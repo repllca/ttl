@@ -121,6 +121,8 @@ class MockSession:
                 if device["fail_count"] >= 3:
                     self.state = "BASTION"
                     return "\r\nPermission denied (publickey,password).\r\n" + self._bastion_return_str()
+                if device.get("type") in ("cisco", "cisco_drop_enable"):
+                    return "\r\n% Login invalid\r\n\r\nPassword: "
                 return "\r\nPermission denied, please try again.\r\nPassword: "
             return self._finish_login(device)
 
@@ -285,7 +287,7 @@ class MockSession:
         elif dtype == "linux":
             return "\r\nuser@linux:~$ "
         elif dtype == "juniper":
-            return "\r\nuser@juniper% "
+            return "\r\nuser@juniper> "
         elif dtype == "telnet_switch":
             device["mode"] = "privileged"
             return "\r\nSwitch# "
@@ -301,7 +303,7 @@ class MockSession:
         elif dtype == "linux":
             return "user@linux:~$ "
         elif dtype == "juniper":
-            return "user@juniper% "
+            return "user@juniper> "
         elif dtype == "telnet_switch":
             return "Switch# "
         return "Node> "

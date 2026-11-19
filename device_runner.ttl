@@ -791,23 +791,37 @@ if result = 0 then
     if result <> 2 goto bastion_disconnected
     sendln ''
     timeout = 5
-    ; 1:__BASTION_RETURN__, 2:>, 3:#, 4:$, 5:%, 6:], 7:assword:
-    wait '__BASTION_RETURN__' '>' '#' '$' '%' ']' 'assword:'
+    ; 1:__BASTION_RETURN__, 2:assword:, 3:invalid, 4:ogin:, 5:ser:, 6:>, 7:#, 8:$, 9:]
+    wait '__BASTION_RETURN__' 'assword:' 'invalid' 'ogin:' 'ser:' '>' '#' '$' ']'
     if result = 1 then
         DEV_DETAIL = 'Connection Timed Out / Closed'
         goto check_next_credential
     endif
-    if result >= 2 and result <= 6 then
-        LOGIN_SUCCESS = 1
-        INIT_PROMPT_IDX = result - 1
-        IS_DEVICE_LOGGED_IN = 1
-        goto login_success_exit
-    endif
-    if result = 7 then
+    if result = 2 or result = 3 then
         testlink
         if result <> 2 goto bastion_disconnected
         sendln ACTIVE_PASS
         goto login_stage2_wait
+    endif
+    if result = 4 or result = 5 then
+        testlink
+        if result <> 2 goto bastion_disconnected
+        sendln ACTIVE_USER
+        goto login_stage1_loop
+    endif
+    if result >= 6 and result <= 9 then
+        LOGIN_SUCCESS = 1
+        if result = 6 then
+            INIT_PROMPT_IDX = 1
+        elseif result = 7 then
+            INIT_PROMPT_IDX = 2
+        elseif result = 8 then
+            INIT_PROMPT_IDX = 3
+        else
+            INIT_PROMPT_IDX = 5
+        endif
+        IS_DEVICE_LOGGED_IN = 1
+        goto login_success_exit
     endif
 
     ; 応答がないため Ctrl+C (#3) で接続試行を中断し、踏み台へ安全に復帰
@@ -824,16 +838,18 @@ endif
 
 ; ------------------------------------------------------
 ; 【第2段階】パスワード送信後のプロンプト待機
-;   パスワード送信後にもう一度 Password: や login: や denied が返ってきた場合は、
+;   パスワード送信後にもう一度 Password: や Login invalid や denied が返ってきた場合は、
 ;   「パスワード誤り」と判定し、別候補があれば次の候補を試行します。
-;   ★重要: 踏み台復帰マーカー '__BASTION_RETURN__' を第1引数に配置することで、
-;   切断後の踏み台プロンプト記号 ($, >, ]) による誤った「ログイン成功」判定を100%防止します。
+;   ★重要設計:
+;     Ciscoのエラーメッセージ（例: '% Login invalid'）の先頭にある '%' を
+;     プロンプトと誤認しないよう、認証失敗キーワード (assword:, invalid, denied等) を
+;     プロンプト記号よりも先に優先判定します。
 ; ------------------------------------------------------
 :login_stage2_wait
 timeout = LOGIN_TIMEOUT
 ; wait引数(10個):
-; 1:__BASTION_RETURN__, 2:>, 3:#, 4:$, 5:%, 6:], 7:assword:, 8:ogin:, 9:ser:, 10:denied
-wait '__BASTION_RETURN__' '>' '#' '$' '%' ']' 'assword:' 'ogin:' 'ser:' 'denied'
+; 1:__BASTION_RETURN__, 2:assword:, 3:invalid, 4:denied, 5:ogin:, 6:ser:, 7:>, 8:#, 9:$, 10:]
+wait '__BASTION_RETURN__' 'assword:' 'invalid' 'denied' 'ogin:' 'ser:' '>' '#' '$' ']'
 
 if result = 1 then
     ; パスワード送信直後に切断されて踏み台へ戻った
@@ -842,15 +858,7 @@ if result = 1 then
 endif
 
 if result >= 2 and result <= 6 then
-    ; ログイン成功！対象機器のプロンプトに到達
-    LOGIN_SUCCESS = 1
-    INIT_PROMPT_IDX = result - 1
-    IS_DEVICE_LOGGED_IN = 1
-    goto login_success_exit
-endif
-
-if result >= 7 and result <= 9 then
-    ; パスワード送信後に再度パスワード/ログイン要求が出た＝パスワード誤り
+    ; 認証失敗 (Password再要求、Invalid、Denied、Login要求等) -> パスワード誤りとして次候補へ
     send #3
     mpause 300
     testlink
@@ -862,17 +870,24 @@ if result >= 7 and result <= 9 then
     goto check_next_credential
 endif
 
-if result = 10 then
-    ; Permission denied / Access denied
-    send #3
-    mpause 300
-    testlink
-    if result <> 2 goto bastion_disconnected
-    sendln 'echo "__BAS""TION_RETURN__"'
-    timeout = 5
-    wait '__BASTION_RETURN__'
-    DEV_DETAIL = 'Auth Failed (Permission Denied)'
-    goto check_next_credential
+if result >= 7 and result <= 10 then
+    ; ログイン成功！対象機器のプロンプトに到達
+    LOGIN_SUCCESS = 1
+    if result = 7 then
+        ; 一般モード (>)
+        INIT_PROMPT_IDX = 1
+    elseif result = 8 then
+        ; 特権モード (#)
+        INIT_PROMPT_IDX = 2
+    elseif result = 9 then
+        ; シェルモード ($)
+        INIT_PROMPT_IDX = 3
+    else
+        ; 特権ブラケット (])
+        INIT_PROMPT_IDX = 5
+    endif
+    IS_DEVICE_LOGGED_IN = 1
+    goto login_success_exit
 endif
 
 if result = 0 then
@@ -881,15 +896,34 @@ if result = 0 then
     if result <> 2 goto bastion_disconnected
     sendln ''
     timeout = 5
-    ; 1:__BASTION_RETURN__, 2:>, 3:#, 4:$, 5:%, 6:]
-    wait '__BASTION_RETURN__' '>' '#' '$' '%' ']'
+    ; 1:__BASTION_RETURN__, 2:assword:, 3:invalid, 4:denied, 5:>, 6:#, 7:$, 8:]
+    wait '__BASTION_RETURN__' 'assword:' 'invalid' 'denied' '>' '#' '$' ']'
     if result = 1 then
         DEV_DETAIL = 'Auth Rejected / Closed by Host'
         goto check_next_credential
     endif
-    if result >= 2 and result <= 6 then
+    if result >= 2 and result <= 4 then
+        send #3
+        mpause 300
+        testlink
+        if result <> 2 goto bastion_disconnected
+        sendln 'echo "__BAS""TION_RETURN__"'
+        timeout = 5
+        wait '__BASTION_RETURN__'
+        DEV_DETAIL = 'Auth Failed (Wrong Password)'
+        goto check_next_credential
+    endif
+    if result >= 5 and result <= 8 then
         LOGIN_SUCCESS = 1
-        INIT_PROMPT_IDX = result - 1
+        if result = 5 then
+            INIT_PROMPT_IDX = 1
+        elseif result = 6 then
+            INIT_PROMPT_IDX = 2
+        elseif result = 7 then
+            INIT_PROMPT_IDX = 3
+        else
+            INIT_PROMPT_IDX = 5
+        endif
         IS_DEVICE_LOGGED_IN = 1
         goto login_success_exit
     endif
