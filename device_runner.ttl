@@ -762,9 +762,11 @@ if result = 4 then
 endif
 
 if result = 5 then
-    ; SSH/Telnetが即座に終了して踏み台に戻った（接続拒否・ホスト不在・認証失敗等）
+    ; SSH/Telnetが即座に終了して踏み台に戻った（接続拒否・ホスト不在等）
+    ; ※機器IP自体に接続できない場合は、無駄なPW候補リトライをせず即座にNG記録して次へ進む
+    DEV_STATUS = 'NG'
     DEV_DETAIL = 'Connection Failed / Closed by Host'
-    goto check_next_credential
+    goto record_result
 endif
 
 if result = 6 or result = 7 then
@@ -1386,22 +1388,24 @@ if F_CRED_OPEN = 1 then
 endif
 fileclose f_csv
 
-sprintf '【踏み台サーバとの接続が切断されました】\n\n'
+sprintf '【踏み台サーバとの接続が切断されました】'#13#10#13#10
 ERROR_MSG = inputstr
-sprintf '■ 発生状況:\n  処理中だった機器: %s (IP: %s)\n  プロトコル: %s / ステータス: %s (%s)\n\n' DEV_NAME DEV_IP DEV_PROTO DEV_STATUS DEV_DETAIL
+sprintf '■ 発生状況:'#13#10'  処理中だった機器: %s (IP: %s)'#13#10'  プロトコル: %s / ステータス: %s (%s)'#13#10#13#10 DEV_NAME DEV_IP DEV_PROTO DEV_STATUS DEV_DETAIL
 strconcat ERROR_MSG inputstr
-strconcat ERROR_MSG '--------------------------------------------------\n'
-strconcat ERROR_MSG '【エラーの原因と確認・対処いただきたいポイント】\n\n'
-strconcat ERROR_MSG '1. 踏み台サーバ側の自動切断設定 (TMOUT / ClientAlive)\n'
-strconcat ERROR_MSG '   踏み台サーバ側の環境変数 TMOUT や sshd の ClientAliveInterval により\n'
-strconcat ERROR_MSG '   無通信または応答待ち中にセッションが切断された可能性があります。\n\n'
-strconcat ERROR_MSG '2. 対象機器へのSSH/Telnet切断時の巻き添え\n'
-strconcat ERROR_MSG '   対象機器への接続が切断または拒否された際、踏み台側の接続が\n'
-strconcat ERROR_MSG '   維持されているかご確認ください。\n\n'
-strconcat ERROR_MSG '3. 踏み台・ネットワーク経路の健全性\n'
-strconcat ERROR_MSG '   PCから踏み台サーバへのネットワーク・VPN接続が切れていないか確認してください。\n'
-strconcat ERROR_MSG '--------------------------------------------------\n'
-sprintf '※切断直前までの実行結果は以下に保存されています:\n%s' SUMMARY_FILE
+strconcat ERROR_MSG '--------------------------------------------------'#13#10
+strconcat ERROR_MSG '【エラーの原因と確認・対処いただきたいポイント】'#13#10#13#10
+strconcat ERROR_MSG '1. device.csv のIPアドレスが実在し、到達可能か確認'#13#10
+strconcat ERROR_MSG '   サンプルの架空IP (192.168.10.x) のまま実行している場合、'#13#10
+strconcat ERROR_MSG '   接続待ちでタイムアウトが連続し、踏み台セッションが切断されます。'#13#10
+strconcat ERROR_MSG '   実在する対象機器のIPアドレスに変更してください。'#13#10#13#10
+strconcat ERROR_MSG '2. 踏み台サーバ側の自動切断設定 (TMOUT / ClientAlive)'#13#10
+strconcat ERROR_MSG '   踏み台サーバ側の環境変数 TMOUT や sshd の設定により、'#13#10
+strconcat ERROR_MSG '   一定時間の無通信や待機で自動ログアウトされた可能性があります。'#13#10#13#10
+strconcat ERROR_MSG '3. ネットワーク・VPN接続の健全性'#13#10
+strconcat ERROR_MSG '   PCから踏み台サーバへのネットワークやVPN接続が切れていないか'#13#10
+strconcat ERROR_MSG '   ご確認ください。'#13#10
+strconcat ERROR_MSG '--------------------------------------------------'#13#10
+sprintf '※切断直前までの実行結果は以下に保存されています:'#13#10'%s' SUMMARY_FILE
 strconcat ERROR_MSG inputstr
 
 messagebox ERROR_MSG '踏み台通信切断エラー (原因と対処方法)'
