@@ -1262,12 +1262,8 @@ flushrecv
 testlink
 if result <> 2 goto bastion_disconnected
 sendln ''
-mpause 200
-testlink
-if result <> 2 goto bastion_disconnected
-sendln ''
-timeout = 5
-waitln '#' '>' '$' '%' ']'
+timeout = 3
+wait '#' '>' '$' '%' ']'
 if result = 1 then
     PROMPT_SYMBOL = '#'
 elseif result = 2 then
@@ -1279,7 +1275,18 @@ elseif result = 4 then
 elseif result = 5 then
     PROMPT_SYMBOL = ']'
 else
-    PROMPT_SYMBOL = '#'
+    ; タイムアウト時はログイン時に検知したプロンプト記号をフォールバック
+    if INIT_PROMPT_IDX = 1 then
+        PROMPT_SYMBOL = '>'
+    elseif INIT_PROMPT_IDX = 2 then
+        PROMPT_SYMBOL = '#'
+    elseif INIT_PROMPT_IDX = 3 then
+        PROMPT_SYMBOL = '$'
+    elseif INIT_PROMPT_IDX = 5 then
+        PROMPT_SYMBOL = ']'
+    else
+        PROMPT_SYMBOL = '#'
+    endif
 endif
 
 if result >= 1 and result <= 5 then
@@ -1368,25 +1375,25 @@ sendln cmd_line
 ; コマンド実行結果の待機ループ (ページング表示 --More-- の自動解除 & 途中切断検知)
 :wait_cmd_prompt
 timeout = CMD_TIMEOUT
-; wait 最大10引数厳守 (9個):
-; 1:FINAL_PROMPT, 2:--More--, 3:-- More --, 4:---(more, 5:More:, 6:続く, 7:RETURN, 8:any key, 9:__BASTION_RETURN__
-wait FINAL_PROMPT '--More--' '-- More --' '---(more' 'More:' '続く' 'RETURN' 'any key' '__BASTION_RETURN__'
+; wait 最大10引数厳守 (10個):
+; 1:FINAL_PROMPT, 2:PROMPT_SYMBOL, 3:--More--, 4:-- More --, 5:---(more, 6:More:, 7:続く, 8:RETURN, 9:any key, 10:__BASTION_RETURN__
+wait FINAL_PROMPT PROMPT_SYMBOL '--More--' '-- More --' '---(more' 'More:' '続く' 'RETURN' 'any key' '__BASTION_RETURN__'
 
-if result = 1 goto read_cmd_loop    ; 機器プロンプトに戻ったので次のコマンドへ
+if result = 1 or result = 2 goto read_cmd_loop    ; 機器プロンプトに戻ったので次のコマンドへ
 
-if result >= 2 and result <= 6 then
+if result >= 3 and result <= 7 then
     ; ページャー表示(--More--等)が出現したため、スペースキーを送信して続きを表示
     send ' '
     goto wait_cmd_prompt
 endif
 
-if result >= 7 and result <= 8 then
+if result >= 8 and result <= 9 then
     ; RETURN / any key 表示が出現したため、Enterキーを送信
     sendln ''
     goto wait_cmd_prompt
 endif
 
-if result = 9 then
+if result = 10 then
     ; コマンド実行中に相手機器から切断されて踏み台に戻った場合
     fileclose f_cmd
     IS_DEVICE_LOGGED_IN = 0
