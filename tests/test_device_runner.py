@@ -126,6 +126,58 @@ class TestTTLSyntax(unittest.TestCase):
                 f"Line {line_num}: Command '{first_word}' is incompatible with Tera Term 4.02!"
             )
 
+    def test_strict_if_statement_syntax(self):
+        """Ensure every 'if' statement is either 'if <cond> then' or 'if <cond> goto <label>' (no invalid 'if cond var = val')."""
+        for line_num, line in enumerate(self.lines, start=1):
+            line_code = line.split(";", 1)[0].strip()
+            if not line_code or not re.match(r"^if\b", line_code, re.IGNORECASE):
+                continue
+            is_then = bool(re.match(r"^if\b.+\bthen$", line_code, re.IGNORECASE))
+            is_goto = bool(re.match(r"^if\b.+\bgoto\s+[a-zA-Z0-9_]+$", line_code, re.IGNORECASE))
+            self.assertTrue(
+                is_then or is_goto,
+                f"Line {line_num}: Invalid or unsafe single-line 'if' statement: {line_code}"
+            )
+
+    def test_dialog_strings_within_255_byte_limit(self):
+        """Verify that every messagebox/ERROR_MSG/DLG_MSG built in device_runner.ttl stays under Tera Term 4.02's 255-byte limit."""
+        current_msg = {}
+        for line_num, line in enumerate(self.lines, start=1):
+            code = line.split(";", 1)[0].strip()
+            if not code:
+                continue
+            m_assign = re.match(r"^(DLG_MSG|ERROR_MSG)\s*=\s*(.+)$", code)
+            if m_assign:
+                var, rhs = m_assign.group(1), m_assign.group(2).strip()
+                if rhs.startswith("'") and rhs.endswith("'"):
+                    current_msg[var] = rhs[1:-1]
+                else:
+                    current_msg[var] = "X" * 40  # placeholder for sprintf result
+            m_cat = re.match(r"^strconcat\s+(DLG_MSG|ERROR_MSG)\s+(.+)$", code)
+            if m_cat:
+                var, rhs = m_cat.group(1), m_cat.group(2).strip()
+                if rhs == "CRLF":
+                    current_msg[var] = current_msg.get(var, "") + "\r\n"
+                elif rhs.startswith("'") and rhs.endswith("'"):
+                    current_msg[var] = current_msg.get(var, "") + rhs[1:-1]
+                else:
+                    # Placeholder for path/sprintf variable (~50 bytes)
+                    current_msg[var] = current_msg.get(var, "") + ("A" * 50)
+            m_box = re.match(r"^(messagebox|inputbox|passwordbox)\s+(DLG_MSG|ERROR_MSG)\b", code)
+            if m_box:
+                var = m_box.group(2)
+                built = current_msg.get(var, "")
+                sjis_len = len(built.encode("cp932", errors="replace"))
+                utf8_len = len(built.encode("utf-8"))
+                self.assertLessEqual(
+                    sjis_len, 250,
+                    f"Line {line_num}: {var} exceeds 250 bytes in Shift-JIS ({sjis_len}B): {built!r}"
+                )
+                self.assertLessEqual(
+                    utf8_len, 250,
+                    f"Line {line_num}: {var} exceeds 250 bytes in UTF-8 ({utf8_len}B): {built!r}"
+                )
+
 
 class TestDeviceCSVAndFallbackLogic(unittest.TestCase):
     def setUp(self):

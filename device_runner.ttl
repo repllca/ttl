@@ -1,56 +1,36 @@
 ; ==============================================================================
-; Tera Term 4.0x系 完全互換 TTLマクロ (マルチベンダー自動ログ収集・高信頼版)
+; Tera Term 4.x系 完全互換 TTLマクロ (マルチベンダー自動ログ収集・高信頼版)
 ; ==============================================================================
 ;
 ; 【このマクロの概要】
 ;   1. 踏み台サーバ（Linux等）へSSH接続します（既に接続済みのウィンドウからの実行も自動判別）。
 ;   2. CSVファイル（device.csv等）から機器一覧（IPアドレス・認証情報等）を1行ずつ読み込みます。
-;   3. 踏み台サーバを経由して各対象機器（Cisco, Yamaha, Juniper, Linux, Telnet等）へ接続します。
-;   4. 機種に応じたログイン・特権昇格（enable/administrator）・ページャー無効化を自動判別します。
-;   5. 機器固有のプロンプト文字列（例: RT-CISCO-01#）を自動取得し、出力途中の '#' や '>' による
-;      誤判定（コマンド暴走）を完全に防止します。
-;   6. コマンド定義ファイル（commands_*.txt）の内容を順次投入し、個別ログに記録します。
-;   7. 相手機器からの離脱時、踏み台復帰マーカー（__BASTION_RETURN__）によって踏み台シェルへの
-;      誤った 'exit' 送信（踏み台の巻き添え切断）を100%防止します。
-;   8. 実行結果のサマリ（成功/失敗/詳細理由）をCSV（summary_YYYYMMDD_HHMMSS.csv）に出力します。
+;   3. ユーザー名・パスワード・管理者PWが空欄の機器には、外部CSV（credentials.csv）の候補を
+;      上から順に自動試行します。
+;      - device.csv にプロトコル(ssh/telnet)記載あり: 一致するプロトコル候補のみ試行
+;      - device.csv にプロトコル未記載(空欄): ssh と telnet の両方を自動試行
+;   4. 認証失敗時は設定秒数（AUTH_RETRY_INTERVAL）のウェイトを挟み、実機のロックアウトを回避します。
+;   5. 機種に応じたログイン・特権昇格（enable/administrator）・ページャー無効化を自動判別します。
+;   6. 機器固有のプロンプト文字列（例: RT-CISCO-01#）を精密に検証・取得し、
+;      コマンド待機タイムアウトや出力途中の誤反応を完全に防止します。
+;   7. コマンド定義ファイル（commands_*.txt）を順次投入し、個別ログおよびサマリCSVを出力します。
+;   8. 対象機器からの離脱時、踏み台復帰マーカー（__BASTION_RETURN__）により
+;      踏み台シェルへの誤った exit 送信（巻き添え切断）を100%防止します。
 ;
-; 【Tera Term 4.02 厳格互換性保証】
-;   - 新しいバージョン（4.53+）専用のコマンド（strsplit, break, continue, sprintf2,
-;     filenamebox, dirnamebox 等）を一切使用せず、Tera Term 4.02 でも確実に動作します。
-;   - すべての wait / waitln コマンドの引数を「最大10個」以内に厳格制限しています。
-;   - logopen 直後の result 未更新仕様（4.02固有）に対応しています。
-;
-; ------------------------------------------------------------------------------
-; 【プログラムの目次】
-;   1. 基準ディレクトリの設定 (相対パスのズレを完全防止)
-;   2. ★【ユーザー設定エリア】 (環境に合わせて初期値を変更できます)
-;   3. ★【対話ポップアップ】 (踏み台接続情報・CSVファイル・ログ保存先の選択)
-;   4. ログ保存先フォルダ作成 & サマリCSVの準備
-;   5. 踏み台サーバへのSSH接続 (未接続時のみ接続・既接続時はそのまま利用)
-;   6. CSVファイルの順次読み込みループ
-;   7. 踏み台から対象機器への接続コマンド発行 (SSH / Telnet + 復帰マーカー付与)
-;   8. 2段階ログイン交渉ループ (バナー誤検知防止・パスワード誤り即検知)
-;   9. 特権モード(管理者昇格)の自動適応 (Cisco enable / Yamaha administrator)
-;  10. ページ送り抑止コマンド送信 & 機器プロンプト文字列の自動取得
-;  11. クリーンログ取得開始 (logopen)
-;  12. コマンドファイルの順次実行 (ページャー自動検知・途中切断検知)
-;  13. 対象機器からの安全切断 (復帰マーカーによる踏み台セッション完全保護)
-;  14. サマリCSVへの結果書き込み
-;  15. 全機器終了処理 & 成功/失敗件数サマリ通知
-;  サブルーチン1: CSV行パーサー (カンマ区切り解析 & 前後空白除去)
-;  サブルーチン2: 文字列前後トリム処理 (空白・タブ・改行・クォート除去)
+; 【Tera Term 4.x 厳格互換性保証】
+;   - 4.53+専用コマンド（strsplit, break, continue, sprintf2等）を一切不使用。
+;   - すべての wait / waitln 引数を最大10個以内に厳格制限。
+;   - すべてのポップアップ文字列を255バイト制限内に収め、CRLF(#13#10)で綺麗に改行。
 ; ==============================================================================
 
 
 ; ==============================================================================
-; 1. 基準ディレクトリの設定 (相対パス解決)
+; 1. 基準ディレクトリの設定 (相対パス解決 & 定数定義)
 ; ==============================================================================
-; Tera Term起動時の作業フォルダが「C:\Program Files (x86)\teraterm」等に
-; なっている場合でも、このマクロと同じフォルダを基準に動作するよう固定します。
 getdir BASE_DIR
 setdir BASE_DIR
 
-; 改行文字定義 (Tera Term 4.02 / Windows MessageBox 互換用 CRLF)
+; 改行文字定義 (Windows MessageBox 互換 CRLF)
 CRLF = #13#10
 
 
@@ -73,30 +53,25 @@ SSH_EXTRA_OPTS = '-o ConnectTimeout=10'
 ; SSH_EXTRA_OPTS = '-o ConnectTimeout=10 -o KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1 -o HostKeyAlgorithms=+ssh-rsa'
 
 ; --- デフォルトのファイル・フォルダ名 ---
-DEF_CSV_NAME   = 'device.csv'             ; 読み込む機器一覧CSVファイル名
-DEF_LOG_NAME   = 'logs'                   ; ログを保存するフォルダ名
-DEF_CMD_NAME   = 'commands_universal.txt' ; CSV側でコマンド未指定時の汎用コマンドファイル
-DEF_CRED_NAME         = 'credentials.csv' ; 外部パスワード一覧CSVファイル名 (ユーザー名,PW,enPW)
-FALLBACK_TO_CRED_FILE = 0                 ; 0: device.csv 固有パスワード失敗時は次機器へ (安全)
-                                          ; 1: device.csv 固有パスワード失敗時も外部CSVの候補を追加試行
+DEF_CSV_NAME          = 'device.csv'             ; 読み込む機器一覧CSVファイル名
+DEF_LOG_NAME          = 'logs'                   ; ログを保存するフォルダ名
+DEF_CMD_NAME          = 'commands_universal.txt' ; CSV側でコマンド未指定時の汎用コマンドファイル
+DEF_CRED_NAME         = 'credentials.csv'        ; 外部パスワード一覧CSV (ユーザー名,PW,enPW,プロトコル)
+FALLBACK_TO_CRED_FILE = 0                        ; 0: device.csv 固有PW失敗時は次機器へ (安全)
+                                                 ; 1: device.csv 固有PW失敗時も外部CSVを追加試行
 
 ; --- タイムアウト設定 (単位: 秒) ---
 LOGIN_TIMEOUT  = 15                 ; 機器へのログイン応答を待つ最大秒数
 CMD_TIMEOUT    = 30                 ; 各コマンドの実行結果を待つ最大秒数
 
 ; --- 試行・待機ウェイト設定 (単位: 秒) ---
-; 【変更のポイント】実機の不正ログイン検知（ブルートフォース防御 / Quiet Mode / アカウントロック）
+; 【変更のポイント】実機の不正ログイン検知（ブルートフォース防御 / Quiet Mode / ロックアウト）
 ; やセッション枯渇を回避するため、認証失敗後の再試行間隔や、機器間の待機秒数を調整できます。
-AUTH_RETRY_INTERVAL = 2             ; 認証失敗後に次のパスワード候補を試行するまでの待機秒数 (推奨: 2〜3秒)
-DEVICE_INTERVAL     = 1             ; 1台の処理完了後、次の機器の処理を開始するまでの待機秒数 (推奨: 1〜2秒)
+AUTH_RETRY_INTERVAL = 2             ; 認証失敗後に次の候補を試行するまでの待機秒数 (推奨: 2〜3秒)
+DEVICE_INTERVAL     = 1             ; 1台の処理完了後、次の機器へ進むまでの待機秒数 (推奨: 1〜2秒)
 
 ; --- 全機器共通のフォールバック認証候補プール（オプション） ---
-; 【変更のポイント】
-; CSV側で指定したユーザー名・パスワードがすべて認証失敗した時、またはCSVで空欄の時に、
-; 追加で自動試行させたい (ユーザー名, パスワード) 候補があれば設定できます。
-; パイプ (|) または セミコロン (;) 区切りで複数指定可能です（空欄 '' の場合は試行しません）。
-; 例: GLOBAL_CRED_USERS  = 'admin|cisco|root'
-;     GLOBAL_CRED_PASSES = 'admin|cisco|default'
+; パイプ (|) または セミコロン (;) 区切りで複数指定可能（空欄 '' の場合は不使用）
 GLOBAL_CRED_USERS  = ''
 GLOBAL_CRED_PASSES = ''
 
@@ -126,8 +101,7 @@ if f_chk <> -1 then
     CRED_FILE = DEF_CRED_PATH
 endif
 
-; すでにTera Termウィンドウで踏み台サーバに接続済みかどうかを確認
-; (result = 2 の場合は、手動で踏み台にログインした状態からマクロが実行されたと判断)
+; すでにTera Termウィンドウで踏み台サーバに接続済みかどうかを確認 (2 = 接続済)
 ALREADY_CONNECTED = 0
 testlink
 if result = 2 then
@@ -135,7 +109,7 @@ if result = 2 then
 endif
 
 ; コマンドライン引数の有無をチェック
-; 引数なし(通常実行): ポップアップダイアログを表示して対話的に選択
+; 引数なし(通常実行): ポップアップダイアログで対話選択
 ; 引数あり(自動テスト/CI): ポップアップを省略して自動実行
 if paramcnt >= 3 then
     ALREADY_CONNECTED = 0
@@ -155,45 +129,45 @@ else
     ; ----------------------------------------------------
     if ALREADY_CONNECTED = 0 then
         ; ポップアップ①: 踏み台サーバのIP / ホスト名
-        inputbox '踏み台サーバのIPアドレス（またはホスト名）を入力してください:' '① 踏み台サーバ接続先' BASTION_HOST
+        inputbox '踏み台サーバのIPアドレス(またはホスト名):' '1. 踏み台サーバ接続先' BASTION_HOST
         BASTION_HOST = inputstr
         strlen BASTION_HOST
         if result = 0 then
-            messagebox '踏み台サーバの接続先が入力されなかったため、処理を中断します。' '中断'
+            messagebox '踏み台サーバの接続先が未入力のため中断します。' '中断'
             end
         endif
 
         ; ポップアップ②: 踏み台サーバのログインユーザー名
-        inputbox '踏み台サーバのログインユーザー名を入力してください:' '② 踏み台ユーザー名' BASTION_USER
+        inputbox '踏み台サーバのログインユーザー名:' '2. 踏み台ユーザー名' BASTION_USER
         BASTION_USER = inputstr
         strlen BASTION_USER
         if result = 0 then
-            messagebox '踏み台サーバのユーザー名が入力されなかったため、処理を中断します。' '中断'
+            messagebox 'ユーザー名が未入力のため中断します。' '中断'
             end
         endif
 
         ; ポップアップ③: 踏み台サーバのログインパスワード
-        sprintf '踏み台サーバ [%s@%s] のパスワードを入力してください:' BASTION_USER BASTION_HOST
-        passwordbox inputstr '③ 踏み台パスワード'
+        sprintf '踏み台 [%s@%s] のパスワード:' BASTION_USER BASTION_HOST
+        passwordbox inputstr '3. 踏み台パスワード'
         BASTION_PASS = inputstr
         strlen BASTION_PASS
         if result = 0 then
-            messagebox 'パスワードが入力されなかったため、処理を中断します。' '中断'
+            messagebox 'パスワードが未入力のため中断します。' '中断'
             end
         endif
     else
-        ; すでに踏み台に接続済みの場合は、CSV内でパスワード省略時に使う共通パスワードのみ確認
-        DLG_MSG = '現在接続中の踏み台セッションをそのまま使用します。'
+        ; すでに踏み台に接続済みの場合は共通パスワードのみ確認
+        DLG_MSG = '接続中の踏み台を使用します。'
         strconcat DLG_MSG CRLF
-        strconcat DLG_MSG 'CSVでパスワード省略時に使う共通パスワードを入力してください（不要なら空欄のままOK）:'
-        passwordbox DLG_MSG '共通パスワード確認（省略可）'
+        strconcat DLG_MSG '共通PW (不要なら空欄でOK):'
+        passwordbox DLG_MSG '共通パスワード確認'
         BASTION_PASS = inputstr
     endif
 
     ; ----------------------------------------------------
     ; ポップアップ④: 機器一覧CSVファイルの選択
     ; ----------------------------------------------------
-    inputbox '読み込む機器一覧CSVファイル名（またはフルパス）を入力してください:' '機器一覧CSVの選択' DEF_CSV_PATH
+    inputbox '機器一覧CSVファイル (ファイル名またはフルパス):' '機器一覧CSVの選択' DEF_CSV_PATH
     CSV_FILE = inputstr
 
     strlen CSV_FILE
@@ -214,16 +188,13 @@ else
         endif
     endif
 
-    ; CSVファイルが存在するか事前にチェック（存在しない場合はエラー表示して終了）
+    ; CSVファイルが存在するか事前にチェック
     fileopen f_chk CSV_FILE 0 1
     if f_chk = -1 then
-        DLG_MSG = '指定された機器一覧CSVファイルが見つかりません:'
+        DLG_MSG = '機器一覧CSVが見つかりません:'
         strconcat DLG_MSG CRLF
         strconcat DLG_MSG CSV_FILE
-        strconcat DLG_MSG CRLF
-        strconcat DLG_MSG CRLF
-        strconcat DLG_MSG 'ファイル名や配置場所をご確認ください。'
-        messagebox DLG_MSG 'エラー: CSVファイル不存在'
+        messagebox DLG_MSG 'エラー: CSV不存在'
         end
     endif
     fileclose f_chk
@@ -231,7 +202,7 @@ else
     ; ----------------------------------------------------
     ; ポップアップ⑤: ログ保存先フォルダの指定
     ; ----------------------------------------------------
-    inputbox 'ログ保存先フォルダのパスを入力してください（存在しない場合は自動作成されます）:' 'ログ保存先フォルダ設定' DEF_LOG_PATH
+    inputbox 'ログ保存先フォルダ (存在しない場合は自動作成):' 'ログ保存先フォルダ' DEF_LOG_PATH
     LOG_DIR = inputstr
 
     strlen LOG_DIR
@@ -255,10 +226,10 @@ else
     ; ----------------------------------------------------
     ; ポップアップ⑥: 外部パスワード一覧CSVファイル (省略可)
     ; ----------------------------------------------------
-    DLG_MSG = '外部パスワードCSVファイル名（ユーザー名,パスワード,管理者PW）を入力してください:'
+    DLG_MSG = '外部認証CSV (ユーザー,PW,enPW,プロトコル):'
     strconcat DLG_MSG CRLF
-    strconcat DLG_MSG '（使用しない場合は空欄のままOK）'
-    inputbox DLG_MSG '外部パスワードCSV選択（省略可）' CRED_FILE
+    strconcat DLG_MSG '※不要な場合は空欄のままOK'
+    inputbox DLG_MSG '外部パスワードCSV選択' CRED_FILE
     CRED_FILE = inputstr
 
     strlen CRED_FILE
@@ -280,13 +251,10 @@ else
         if f_chk <> -1 then
             fileclose f_chk
         else
-            DLG_MSG = '指定された外部パスワードCSVが見つかりません:'
+            DLG_MSG = '外部CSVが見つかりません(不使用で続行):'
             strconcat DLG_MSG CRLF
             strconcat DLG_MSG CRED_FILE
-            strconcat DLG_MSG CRLF
-            strconcat DLG_MSG CRLF
-            strconcat DLG_MSG 'パスワードCSVを使用せずに処理を続行します。'
-            messagebox DLG_MSG 'パスワードCSV不存在'
+            messagebox DLG_MSG '警告: 外部CSV不存在'
             CRED_FILE = ''
         endif
     endif
@@ -295,23 +263,24 @@ endif
 ; パス末尾の余分なスラッシュ/バックスラッシュを除去して正規化
 strlen LOG_DIR
 DIR_LEN = result
-strcopy LOG_DIR DIR_LEN 1 LAST_CHAR
-strcompare LAST_CHAR '\'
-if result = 0 then
-    CUT_LEN = DIR_LEN - 1
-    strcopy LOG_DIR 1 CUT_LEN LOG_DIR
-endif
-strcompare LAST_CHAR '/'
-if result = 0 then
-    CUT_LEN = DIR_LEN - 1
-    strcopy LOG_DIR 1 CUT_LEN LOG_DIR
+if DIR_LEN > 1 then
+    strcopy LOG_DIR DIR_LEN 1 LAST_CHAR
+    strcompare LAST_CHAR '\'
+    if result = 0 then
+        CUT_LEN = DIR_LEN - 1
+        strcopy LOG_DIR 1 CUT_LEN LOG_DIR
+    endif
+    strcompare LAST_CHAR '/'
+    if result = 0 then
+        CUT_LEN = DIR_LEN - 1
+        strcopy LOG_DIR 1 CUT_LEN LOG_DIR
+    endif
 endif
 
 
 ; ==============================================================================
 ; 4. ログ保存先フォルダ作成 & サマリCSVの準備
 ; ==============================================================================
-; ログフォルダが存在しない場合は自動作成
 sprintf 'cmd.exe /c if not exist "%s" mkdir "%s"' LOG_DIR LOG_DIR
 exec inputstr 'hide'
 mpause 500
@@ -329,15 +298,14 @@ if f_sum = -1 then
     SUMMARY_FILE = inputstr
     fileopen f_sum SUMMARY_FILE 0
     if f_sum = -1 then
-        messagebox 'ログ保存先フォルダへの書き込み権限がありません。実行権限を確認してください。' 'エラー'
+        messagebox 'ログ保存先への書き込み権限がありません。' 'エラー'
         end
     endif
 endif
-; サマリCSVのヘッダ行を出力
 filewriteln f_sum 'Timestamp,Hostname,IP,Protocol,Prompt,Status,Detail,Auth_User'
 fileclose f_sum
 
-; ログイン成功アカウント一覧CSVの準備 (どの機器にどのアカウントで入れたかを保存)
+; ログイン成功アカウント一覧CSVの準備
 sprintf '%s\resolved_accounts_%s.csv' LOG_DIR RUN_ID
 RESOLVED_FILE = inputstr
 fileopen f_res RESOLVED_FILE 0
@@ -351,30 +319,19 @@ endif
 ; 5. 踏み台サーバへのSSH接続
 ; ==============================================================================
 if ALREADY_CONNECTED = 0 then
-    ; BASTION_HOST にポート番号(:22等)が含まれているか確認
     strscan BASTION_HOST ':'
     if result = 0 then
-        sprintf '%s:%s /ssh /2 /auth=password /user=%s /passwd=%s' BASTION_HOST BASTION_PORT BASTION_USER BASTION_PASS
+        sprintf '%s:%s /ssh /2 /auth=password /user="%s" /passwd="%s"' BASTION_HOST BASTION_PORT BASTION_USER BASTION_PASS
     else
-        sprintf '%s /ssh /2 /auth=password /user=%s /passwd=%s' BASTION_HOST BASTION_USER BASTION_PASS
+        sprintf '%s /ssh /2 /auth=password /user="%s" /passwd="%s"' BASTION_HOST BASTION_USER BASTION_PASS
     endif
     connect inputstr
 
-    ; connect コマンドの戻り値判定 (2 = 接続成功)
     if result <> 2 then
-        sprintf '踏み台サーバ (%s) へのSSH接続に失敗しました。' BASTION_HOST
+        sprintf '踏み台(%s)へ接続できませんでした。' BASTION_HOST
         DLG_MSG = inputstr
         strconcat DLG_MSG CRLF
-        strconcat DLG_MSG CRLF
-        strconcat DLG_MSG '【確認項目】:'
-        strconcat DLG_MSG CRLF
-        sprintf '1. 踏み台サーバのIPアドレス(%s)とポート番号(%s)が正しいか' BASTION_HOST BASTION_PORT
-        strconcat DLG_MSG inputstr
-        strconcat DLG_MSG CRLF
-        sprintf '2. ユーザー名(%s)とパスワードが正しいか' BASTION_USER
-        strconcat DLG_MSG inputstr
-        strconcat DLG_MSG CRLF
-        strconcat DLG_MSG '3. PCから踏み台サーバへネットワークが繋がっているか'
+        strconcat DLG_MSG 'IP・ポート・ユーザー名・PWを確認してください。'
         messagebox DLG_MSG '踏み台SSH接続エラー'
         end
     endif
@@ -383,20 +340,14 @@ if ALREADY_CONNECTED = 0 then
     timeout = 30
     wait BASTION_PROMPT '$' '#' '>' '%' ']'
     if result = 0 then
-        DLG_MSG = '踏み台サーバへの接続後、プロンプト待機がタイムアウトしました。'
+        DLG_MSG = '踏み台のプロンプト待機がタイムアウトしました。'
         strconcat DLG_MSG CRLF
-        strconcat DLG_MSG CRLF
-        strconcat DLG_MSG '【確認項目】:'
-        strconcat DLG_MSG CRLF
-        strconcat DLG_MSG '1. パスワードが間違っていないか（画面上で再入力待ちになっていないか）'
-        strconcat DLG_MSG CRLF
-        strconcat DLG_MSG '2. 踏み台サーバのログインバナー等でEnter待ちになっていないか'
-        messagebox DLG_MSG 'プロンプト待機タイムアウト'
+        strconcat DLG_MSG 'PW誤りやバナー停止を確認してください。'
+        messagebox DLG_MSG '接続タイムアウト'
         disconnect 0
         end
     endif
 
-    ; 踏み台サーバの実際のプロンプト記号を自動認識して更新
     if result = 2 then
         BASTION_PROMPT = '$'
     elseif result = 3 then
@@ -409,7 +360,7 @@ if ALREADY_CONNECTED = 0 then
         BASTION_PROMPT = ']'
     endif
 else
-    ; すでに接続済みの場合はEnterを1回送って現在のプロンプトを確認
+    ; すでに接続済みの場合はEnterを1回送ってプロンプトを確認
     flushrecv
     sendln ''
     timeout = 10
@@ -439,11 +390,11 @@ NG_COUNT = 0
 
 
 ; ==============================================================================
-; 6. CSVファイルの順次読み込みループ
+; 6. 機器一覧CSVファイルの順次読み込みループ
 ; ==============================================================================
 fileopen f_csv CSV_FILE 0 1
 if f_csv = -1 then
-    messagebox 'CSVファイルを開くことができませんでした。' 'エラー'
+    messagebox '機器一覧CSVを開けませんでした。' 'エラー'
     if ALREADY_CONNECTED = 0 then
         sendln 'exit'
         disconnect 0
@@ -452,21 +403,21 @@ if f_csv = -1 then
 endif
 
 :read_csv_loop
-; 踏み台との通信セッションが正常に継続しているかチェック (2 = 正常接続中)
+; 踏み台との通信セッションが継続しているかチェック (2 = 正常接続中)
 testlink
 if result <> 2 goto bastion_disconnected
 
 ; 機器一覧CSVから1行読み込み
 filereadln f_csv line
-if result = 1 goto end_csv_loop     ; ファイル終端(EOF)に達したら終了
+if result = 1 goto end_csv_loop
 
-; 行の前後の空白・改行をトリム
+; 行の前後の空白・改行・BOMをトリム
 TRIM_VAL = line
 call trim_string
 line = TRIM_VAL
 
 strlen line
-if result = 0 goto read_csv_loop    ; 空行はスキップ
+if result = 0 goto read_csv_loop
 
 ; コメント行(# または ; で始まる行)はスキップ
 strcopy line 1 1 first_char
@@ -475,10 +426,10 @@ if result = 0 goto read_csv_loop
 strcompare first_char ';'
 if result = 0 goto read_csv_loop
 
-; CSV行パーサーサブルーチンを呼び出して各列に分解（各列の前後空白も自動除去）
+; CSV行パーサーサブルーチンを呼び出して7列に分解
 call parse_csv_line
 
-; CSVのタイトル行(ホスト名, IP等のヘッダ)はスキップ
+; ヘッダ行スキップ
 strcompare DEV_NAME 'ホスト名'
 if result = 0 goto read_csv_loop
 strcompare DEV_NAME 'hostname'
@@ -486,31 +437,34 @@ if result = 0 goto read_csv_loop
 strcompare DEV_NAME 'Hostname'
 if result = 0 goto read_csv_loop
 
-; IPアドレスが未入力の行はスキップ
+; IPアドレスが空欄の行はスキップ
 strlen DEV_IP
 if result = 0 goto read_csv_loop
 
-; 処理対象台数をカウントアップ
 TOTAL_COUNT = TOTAL_COUNT + 1
 
-; --- CSV内の空欄（欠損値）に対する自動フォールバック補完 ---
+; --- CSV内の空欄（欠損値）に対する自動補完 ---
 ; 1) ホスト名未指定時: IPアドレスで代替
 strlen DEV_NAME
 if result = 0 then
     DEV_NAME = DEV_IP
 endif
 
-; 2) プロトコル元指定の記録 (未指定時は両方試行モード用フラグをセット)
-ORIG_DEV_PROTO = DEV_PROTO
+; 2) プロトコル元指定の正規化と記録 (未指定時はSSH/Telnet両方試行)
+NORM_PROTO = DEV_PROTO
+call normalize_proto
+ORIG_DEV_PROTO = NORM_PROTO
+
 strlen ORIG_DEV_PROTO
 if result = 0 then
     HAS_ORIG_PROTO = 0
     DEV_PROTO = 'ssh'
 else
     HAS_ORIG_PROTO = 1
+    DEV_PROTO = ORIG_DEV_PROTO
 endif
 
-; 3) コマンドファイル未指定時: 汎用コマンドファイル(commands_universal.txt)を使用
+; 3) コマンドファイル未指定時: 汎用コマンドファイルを使用
 strlen DEV_CMD
 if result = 0 then
     DEV_CMD = DEFAULT_CMD
@@ -532,6 +486,7 @@ endif
 ; 機器処理用の管理変数を初期化
 DEV_STATUS = 'NG'
 DEV_DETAIL = 'Unknown'
+LAST_FAIL_DETAIL = ''
 FINAL_PROMPT = '?'
 PROMPT_SYMBOL = '?'
 IS_LOG_OPEN = 0
@@ -540,15 +495,18 @@ AUTH_ATTEMPT = 0
 F_CRED_OPEN = 0
 F_CRED_TRIED = 0
 PROTO_DUAL_PHASE = 0
+SSH_PORT_DEAD = 0
+TELNET_PORT_DEAD = 0
+ENABLE_FAILED = 0
 ACTIVE_USER = ''
 ACTIVE_PASS = ''
 ACTIVE_ENPASS = ''
 
 ; ------------------------------------------------------
 ; ★【認証情報の優先順位判定】
-;   1. device.csv に固有の認証情報（ユーザー名/パスワード）があれば最優先で試行
-;   2. device.csv が空欄、または1が失敗した場合は外部パスワードCSV (credentials.csv) を順次試行
-;   3. それでもログインできない場合は踏み台の認証情報でフォールバック試行
+;   1. device.csv にユーザー名/パスワード記載あり -> そちらを最優先で試行
+;   2. device.csv が空欄 -> 外部パスワードCSV (credentials.csv) を順次試行
+;   3. 外部CSVも未設定 -> 踏み台の認証情報で試行
 ; ------------------------------------------------------
 HAS_DEV_CRED = 0
 strlen DEV_USER
@@ -588,22 +546,29 @@ if result > 0 then
     endif
 endif
 
-; device.csv に固有指定（またはパイプ指定）があればまずそれを試行
+; 1) device.csv に固有指定があればまずそれを試行
 if HAS_DEV_CRED = 1 then
     goto try_inline_credential
 endif
 
-; device.csv が空欄で外部パスワードCSVが有効なら、直接外部CSVから試行開始
+; 2) device.csv が空欄で外部パスワードCSVが有効なら外部CSVから試行開始
 strlen CRED_FILE
 if result > 0 then
     goto open_cred_csv_file
 endif
 
-; 外部CSVもなければ踏み台認証情報フォールバック
+; 3) 外部CSVもなければ踏み台認証情報で試行
 ACTIVE_USER = BASTION_USER
 ACTIVE_PASS = BASTION_PASS
 ACTIVE_ENPASS = BASTION_PASS
 AUTH_ATTEMPT = 1
+if HAS_ORIG_PROTO = 0 then
+    DEV_PROTO = 'ssh'
+    PROTO_DUAL_PHASE = 1
+else
+    DEV_PROTO = ORIG_DEV_PROTO
+    PROTO_DUAL_PHASE = 0
+endif
 goto issue_connect_cmd
 
 
@@ -615,20 +580,28 @@ goto issue_connect_cmd
 :try_inline_credential
 call pop_next_credential
 if HAS_CRED = 0 then
-    ; インライン候補が尽きた場合、外部パスワードCSVがあれば外部ファイルへ移行
+    ; インライン候補が尽きた場合、フォールバック許可時なら外部CSVへ移行
     strlen CRED_FILE
     if result > 0 and F_CRED_TRIED = 0 then
-        goto open_cred_csv_file
+        if HAS_DEV_CRED = 0 or FALLBACK_TO_CRED_FILE = 1 then
+            goto open_cred_csv_file
+        endif
     endif
     DEV_STATUS = 'NG'
     if AUTH_ATTEMPT > 1 then
         sprintf 'All %d Auth Attempts Failed' AUTH_ATTEMPT
         DEV_DETAIL = inputstr
+    else
+        strlen LAST_FAIL_DETAIL
+        if result > 0 then
+            DEV_DETAIL = LAST_FAIL_DETAIL
+        else
+            DEV_DETAIL = 'Auth Failed'
+        endif
     endif
     goto record_result
 endif
 
-AUTH_ATTEMPT = AUTH_ATTEMPT + 1
 ACTIVE_USER = CURR_USER
 ACTIVE_PASS = CURR_PASS
 ACTIVE_ENPASS = DEV_ENPASS
@@ -638,12 +611,26 @@ if result = 0 then
 endif
 
 if HAS_ORIG_PROTO = 0 then
-    DEV_PROTO = 'ssh'
-    PROTO_DUAL_PHASE = 1
+    if SSH_PORT_DEAD = 0 and TELNET_PORT_DEAD = 0 then
+        DEV_PROTO = 'ssh'
+        PROTO_DUAL_PHASE = 1
+    elseif SSH_PORT_DEAD = 0 then
+        DEV_PROTO = 'ssh'
+        PROTO_DUAL_PHASE = 0
+    elseif TELNET_PORT_DEAD = 0 then
+        DEV_PROTO = 'telnet'
+        PROTO_DUAL_PHASE = 0
+    else
+        DEV_STATUS = 'NG'
+        DEV_DETAIL = 'Connection Refused (SSH & Telnet)'
+        goto record_result
+    endif
 else
     DEV_PROTO = ORIG_DEV_PROTO
     PROTO_DUAL_PHASE = 0
 endif
+
+AUTH_ATTEMPT = AUTH_ATTEMPT + 1
 goto issue_connect_cmd
 
 
@@ -660,6 +647,13 @@ if f_cred = -1 then
     ACTIVE_PASS = BASTION_PASS
     ACTIVE_ENPASS = BASTION_PASS
     AUTH_ATTEMPT = 1
+    if HAS_ORIG_PROTO = 0 then
+        DEV_PROTO = 'ssh'
+        PROTO_DUAL_PHASE = 1
+    else
+        DEV_PROTO = ORIG_DEV_PROTO
+        PROTO_DUAL_PHASE = 0
+    endif
     goto issue_connect_cmd
 endif
 F_CRED_OPEN = 1
@@ -674,8 +668,21 @@ if result = 1 then
     if AUTH_ATTEMPT > 1 then
         sprintf 'All %d Auth Attempts Failed (Password CSV exhausted)' AUTH_ATTEMPT
         DEV_DETAIL = inputstr
+    elseif AUTH_ATTEMPT = 1 then
+        strlen LAST_FAIL_DETAIL
+        if result > 0 then
+            DEV_DETAIL = LAST_FAIL_DETAIL
+        else
+            DEV_DETAIL = 'Auth Failed'
+        endif
     else
-        DEV_DETAIL = 'Auth Failed'
+        ; 1件も試行できなかった場合 (プロトコル一致候補なし等)
+        strlen LAST_FAIL_DETAIL
+        if result > 0 then
+            DEV_DETAIL = LAST_FAIL_DETAIL
+        else
+            DEV_DETAIL = 'No Matching Credential in CSV'
+        endif
     endif
     goto record_result
 endif
@@ -695,7 +702,7 @@ if result = 0 goto read_cred_csv_loop
 strcompare fc_cred ';'
 if result = 0 goto read_cred_csv_loop
 
-; パスワードCSV行のパース (ユーザー名, パスワード, 管理者PW)
+; パスワードCSV行のパース (ユーザー名, パスワード, 管理者PW, プロトコル)
 PARSE_CRED_STR = cred_line
 call parse_cred_line
 
@@ -725,63 +732,66 @@ if result = 0 then
     C_ENPASS = C_PASS
 endif
 
-; もし直前の device.csv 固有認証と全く同一なら二重試行をスキップ
-if HAS_DEV_CRED = 1 and AUTH_ATTEMPT = 1 then
-    strcompare C_USER DEV_USER
-    if result = 0 then
-        strcompare C_PASS DEV_PASS
-        if result = 0 goto read_cred_csv_loop
-    endif
-endif
+; CSV第4列(プロトコル)を小文字正規化 ('ssh' / 'telnet' / '')
+NORM_PROTO = C_PROTO
+call normalize_proto
+C_PROTO = NORM_PROTO
 
-; プロトコル適合性チェック & 選択
+; --- プロトコル適合性チェック & 選択 ---
 strlen C_PROTO
 CP_PROTO_LEN = result
 
 if HAS_ORIG_PROTO = 1 then
-    ; 機器側でプロトコルが元々指定されている場合: 一致するもののみ試行
+    ; device.csv でプロトコルが元々指定されている場合:
+    ; credentials.csv 側にプロトコル指定があり、かつ一致しない行はスキップ
     if CP_PROTO_LEN > 0 then
         strcompare C_PROTO ORIG_DEV_PROTO
-        if result <> 0 then
-            IS_PROTO_MATCH = 0
-            strcompare ORIG_DEV_PROTO 'ssh'
-            if result = 0 then
-                strcompare C_PROTO 'SSH'
-                if result = 0 IS_PROTO_MATCH = 1
-            endif
-            strcompare ORIG_DEV_PROTO 'SSH'
-            if result = 0 then
-                strcompare C_PROTO 'ssh'
-                if result = 0 IS_PROTO_MATCH = 1
-            endif
-            strcompare ORIG_DEV_PROTO 'telnet'
-            if result = 0 then
-                strcompare C_PROTO 'TELNET'
-                if result = 0 IS_PROTO_MATCH = 1
-            endif
-            strcompare ORIG_DEV_PROTO 'TELNET'
-            if result = 0 then
-                strcompare C_PROTO 'telnet'
-                if result = 0 IS_PROTO_MATCH = 1
-            endif
-            if IS_PROTO_MATCH = 0 then
-                ; プロトコル不一致のためスキップ
-                goto read_cred_csv_loop
-            endif
-        endif
+        if result <> 0 goto read_cred_csv_loop
     endif
     DEV_PROTO = ORIG_DEV_PROTO
     PROTO_DUAL_PHASE = 0
 else
-    ; 機器側でプロトコルが元々未指定の場合
+    ; device.csv でプロトコルが元々未指定の場合: 両方試行対応
     if CP_PROTO_LEN > 0 then
-        ; credentials.csv 側で指定されているプロトコルを使用
+        ; credentials.csv 側で指定されているプロトコルを使用 (既に閉鎖判明済みのポートはスキップ)
+        strcompare C_PROTO 'ssh'
+        if result = 0 then
+            if SSH_PORT_DEAD = 1 goto read_cred_csv_loop
+        endif
+        strcompare C_PROTO 'telnet'
+        if result = 0 then
+            if TELNET_PORT_DEAD = 1 goto read_cred_csv_loop
+        endif
         DEV_PROTO = C_PROTO
         PROTO_DUAL_PHASE = 0
     else
         ; どちらも未指定なら両方試す (まずSSH、失敗時Telnet)
-        DEV_PROTO = 'ssh'
-        PROTO_DUAL_PHASE = 1
+        if SSH_PORT_DEAD = 0 and TELNET_PORT_DEAD = 0 then
+            DEV_PROTO = 'ssh'
+            PROTO_DUAL_PHASE = 1
+        elseif SSH_PORT_DEAD = 0 then
+            DEV_PROTO = 'ssh'
+            PROTO_DUAL_PHASE = 0
+        elseif TELNET_PORT_DEAD = 0 then
+            DEV_PROTO = 'telnet'
+            PROTO_DUAL_PHASE = 0
+        else
+            ; SSHもTelnetも両方ポート拒否と判明済みなら即座に終了
+            fileclose f_cred
+            F_CRED_OPEN = 0
+            DEV_STATUS = 'NG'
+            DEV_DETAIL = 'Connection Refused (SSH & Telnet)'
+            goto record_result
+        endif
+    endif
+endif
+
+; 直前の device.csv 固有認証と全く同一なら二重試行をスキップ
+if HAS_DEV_CRED = 1 and HAS_ORIG_PROTO = 1 and AUTH_ATTEMPT = 1 then
+    strcompare C_USER DEV_USER
+    if result = 0 then
+        strcompare C_PASS DEV_PASS
+        if result = 0 goto read_cred_csv_loop
     endif
 endif
 
@@ -794,83 +804,68 @@ goto issue_connect_cmd
 
 ; --- C) 接続コマンド発行 (SSH / Telnet + 踏み台復帰マーカー) ---
 :issue_connect_cmd
+; 2回目以降の試行時はウェイトを挿入（実機のブルートフォース防御・連続失敗ロック回避）
+if AUTH_ATTEMPT > 1 then
+    if AUTH_RETRY_INTERVAL > 0 then
+        pause AUTH_RETRY_INTERVAL
+    else
+        mpause 300
+    endif
+endif
+
+testlink
+if result <> 2 goto bastion_disconnected
 flushrecv
 
 strcompare DEV_PROTO 'telnet'
 if result = 0 goto do_telnet
-strcompare DEV_PROTO 'TELNET'
-if result = 0 goto do_telnet
 
-; --- SSH接続コマンド発行 ---
-sprintf 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null %s ' SSH_EXTRA_OPTS
-SEND_CMD = inputstr
+; --- SSH接続コマンド発行 (255バイト制限を回避するため分割送信) ---
+; NumberOfPasswordPrompts=1 により、PW誤り時にSSHが即座に正常終了して踏み台へ戻ります
+send 'ssh -o NumberOfPasswordPrompts=1 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null '
+strlen SSH_EXTRA_OPTS
+if result > 0 then
+    send SSH_EXTRA_OPTS
+    send ' '
+endif
 strlen ACTIVE_USER
 if result > 0 then
-    strconcat SEND_CMD ACTIVE_USER
-    strconcat SEND_CMD '@'
+    send ACTIVE_USER
+    send '@'
 endif
-strconcat SEND_CMD DEV_IP
-strconcat SEND_CMD ' ; echo "__BAS""TION_RETURN__"'
-testlink
-if result <> 2 goto bastion_disconnected
-sendln SEND_CMD
+send DEV_IP
+sendln ' ; echo "__BAS""TION_RETURN__"'
 goto login_negotiate_loop
 
 ; --- Telnet接続コマンド発行 ---
 :do_telnet
-SEND_CMD = 'telnet '
-strconcat SEND_CMD DEV_IP
-strconcat SEND_CMD ' ; echo "__BAS""TION_RETURN__"'
-testlink
-if result <> 2 goto bastion_disconnected
-sendln SEND_CMD
+send 'telnet '
+send DEV_IP
+sendln ' ; echo "__BAS""TION_RETURN__"'
 
 
 ; ==============================================================================
-; 8. 2段階ログイン交渉ループ (バナー誤検知防止・パスワード誤り即検知)
+; 8. 2段階ログイン交渉ループ (SSH / Telnet 完全対応・誤検知防止)
 ; ==============================================================================
 :login_negotiate_loop
 LOGIN_SUCCESS = 0
 INIT_PROMPT_IDX = 0
+STAGE1_USER_SENT = 0
 
 ; ------------------------------------------------------
-; 【第1段階】パスワード送信前の待機
-;   ログイン前バナーに含まれる '#' や '>' や ']' をプロンプトと誤認しないよう、
-;   ここでは認証要求（yes/no, login:, Password:）または接続失敗マーカーのみを待ちます。
+; 【第1段階】パスワード送信前の待機 (バナー内の '#', '>', '$' に誤反応しない)
 ; ------------------------------------------------------
 :login_stage1_loop
 timeout = LOGIN_TIMEOUT
-; wait引数(9個):
-; 1:yes/no, 2:ogin:, 3:ser:, 4:assword:, 5:__BASTION_RETURN__,
-; 6:no matching, 7:Unable to negotiate, 8:refused, 9:unreachable
-wait 'yes/no' 'ogin:' 'ser:' 'assword:' '__BASTION_RETURN__' 'no matching' 'Unable to negotiate' 'refused' 'unreachable'
+; wait引数(10個厳守):
+; 1:__BASTION_RETURN__, 2:yes/no, 3:ogin:, 4:sername:, 5:ser:,
+; 6:assword:, 7:no matching, 8:Unable to negotiate, 9:refused, 10:unreachable
+wait '__BASTION_RETURN__' 'yes/no' 'ogin:' 'sername:' 'ser:' 'assword:' 'no matching' 'Unable to negotiate' 'refused' 'unreachable'
+STAGE1_RES = result
 
-if result = 1 then
-    ; 初回SSH接続時のフィンガープリント確認 (yes/no)
-    testlink
-    if result <> 2 goto bastion_disconnected
-    sendln 'yes'
-    goto login_stage1_loop
-endif
-
-if result = 2 or result = 3 then
-    ; ユーザー名入力要求 (login: / Username:)
-    testlink
-    if result <> 2 goto bastion_disconnected
-    sendln ACTIVE_USER
-    goto login_stage1_loop
-endif
-
-if result = 4 then
-    ; パスワード入力要求 (Password:) -> パスワードを送信して【第2段階】へ進む
-    testlink
-    if result <> 2 goto bastion_disconnected
-    sendln ACTIVE_PASS
-    goto login_stage2_wait
-endif
-
-if result = 5 then
+if STAGE1_RES = 1 then
     ; SSH/Telnetが即座に終了して踏み台に戻った（接続拒否・ホスト不在等）
+    LAST_FAIL_DETAIL = 'Connection Failed / Closed by Host'
     if PROTO_DUAL_PHASE = 1 then
         goto check_next_credential
     endif
@@ -878,71 +873,135 @@ if result = 5 then
         goto check_next_credential
     endif
     DEV_STATUS = 'NG'
-    DEV_DETAIL = 'Connection Failed / Closed by Host'
+    DEV_DETAIL = LAST_FAIL_DETAIL
     goto record_result
 endif
 
-if result = 6 or result = 7 then
+if STAGE1_RES = 2 then
+    ; 初回SSH接続時のフィンガープリント確認 (yes/no)
+    testlink
+    if result <> 2 goto bastion_disconnected
+    sendln 'yes'
+    goto login_stage1_loop
+endif
+
+if STAGE1_RES >= 3 and STAGE1_RES <= 5 then
+    ; ユーザー名入力要求 (login: / Username: / User:)
+    STAGE1_USER_SENT = STAGE1_USER_SENT + 1
+    if STAGE1_USER_SENT >= 2 then
+        ; 同一接続内で2回目のユーザー名再要求 -> 認証失敗として次候補へ
+        call abort_to_bastion
+        LAST_FAIL_DETAIL = 'Auth Failed (Username Rejected)'
+        goto check_next_credential
+    endif
+    testlink
+    if result <> 2 goto bastion_disconnected
+    sendln ACTIVE_USER
+    goto login_stage1_loop
+endif
+
+if STAGE1_RES = 6 then
+    ; パスワード入力要求 (Password:) -> パスワードを送信して【第2段階】へ進む
+    testlink
+    if result <> 2 goto bastion_disconnected
+    sendln ACTIVE_PASS
+    goto login_stage2_wait
+endif
+
+if STAGE1_RES = 7 or STAGE1_RES = 8 then
     ; 古い機器でSSH鍵交換アルゴリズム等が不一致の場合
     timeout = 5
     wait '__BASTION_RETURN__'
+    SSH_PORT_DEAD = 1
+    LAST_FAIL_DETAIL = 'SSH Algorithm Mismatch (Check SSH_EXTRA_OPTS)'
     if PROTO_DUAL_PHASE = 1 then
         goto check_next_credential
     endif
     if HAS_ORIG_PROTO = 0 and F_CRED_OPEN = 1 then
         goto check_next_credential
     endif
-    DEV_DETAIL = 'SSH Algorithm Mismatch (Check SSH_EXTRA_OPTS)'
+    DEV_STATUS = 'NG'
+    DEV_DETAIL = LAST_FAIL_DETAIL
     goto record_result
 endif
 
-if result = 8 or result = 9 then
-    ; Connection refused / Network is unreachable
+if STAGE1_RES = 9 then
+    ; Connection refused (対象ポートが閉じている)
     timeout = 5
     wait '__BASTION_RETURN__'
-    if result = 8 then
-        if PROTO_DUAL_PHASE = 1 then
-            goto check_next_credential
-        endif
-        if HAS_ORIG_PROTO = 0 and F_CRED_OPEN = 1 then
-            goto check_next_credential
-        endif
+    strcompare DEV_PROTO 'ssh'
+    if result = 0 then
+        SSH_PORT_DEAD = 1
+    else
+        TELNET_PORT_DEAD = 1
     endif
+    LAST_FAIL_DETAIL = 'Connection Refused / Unreachable'
+    if HAS_ORIG_PROTO = 0 then
+        ; プロトコル未指定機器なら別プロトコル(例: SSH拒否 -> Telnet)を試行可能
+        if SSH_PORT_DEAD = 1 and TELNET_PORT_DEAD = 1 then
+            DEV_STATUS = 'NG'
+            DEV_DETAIL = 'Connection Refused (SSH & Telnet)'
+            goto record_result
+        endif
+        goto check_next_credential
+    endif
+    DEV_STATUS = 'NG'
+    DEV_DETAIL = LAST_FAIL_DETAIL
+    goto record_result
+endif
+
+if STAGE1_RES = 10 then
+    ; Network is unreachable (到達不能)
+    timeout = 5
+    wait '__BASTION_RETURN__'
+    DEV_STATUS = 'NG'
     DEV_DETAIL = 'Connection Refused / Unreachable'
     goto record_result
 endif
 
-if result = 0 then
-    ; タイムアウト時: 公開鍵認証等でパスワードなしログイン済みか、バナーでEnter待ちの可能性
+if STAGE1_RES = 0 then
+    ; タイムアウト時: 公開鍵認証等でパスワードなしログイン済みか、Enter待ちかを確認
     testlink
     if result <> 2 goto bastion_disconnected
     sendln ''
     timeout = 5
-    ; 1:__BASTION_RETURN__, 2:assword:, 3:invalid, 4:ogin:, 5:ser:, 6:>, 7:#, 8:$, 9:]
-    wait '__BASTION_RETURN__' 'assword:' 'invalid' 'ogin:' 'ser:' '>' '#' '$' ']'
+    ; wait引数(10個厳守):
+    ; 1:__BASTION_RETURN__, 2:assword:, 3:ogin:, 4:sername:, 5:ser:, 6:invalid, 7:>, 8:#, 9:$, 10:]
+    wait '__BASTION_RETURN__' 'assword:' 'ogin:' 'sername:' 'ser:' 'invalid' '>' '#' '$' ']'
     if result = 1 then
-        DEV_DETAIL = 'Connection Timed Out / Closed'
+        LAST_FAIL_DETAIL = 'Connection Timed Out / Closed'
         goto check_next_credential
     endif
-    if result = 2 or result = 3 then
+    if result = 2 then
         testlink
         if result <> 2 goto bastion_disconnected
         sendln ACTIVE_PASS
         goto login_stage2_wait
     endif
-    if result = 4 or result = 5 then
-        testlink
-        if result <> 2 goto bastion_disconnected
-        sendln ACTIVE_USER
-        goto login_stage1_loop
+    if result >= 3 and result <= 5 then
+        if STAGE1_USER_SENT = 0 then
+            STAGE1_USER_SENT = 1
+            testlink
+            if result <> 2 goto bastion_disconnected
+            sendln ACTIVE_USER
+            goto login_stage1_loop
+        endif
+        call abort_to_bastion
+        LAST_FAIL_DETAIL = 'Auth Failed (Login Prompt)'
+        goto check_next_credential
     endif
-    if result >= 6 and result <= 9 then
+    if result = 6 then
+        call abort_to_bastion
+        LAST_FAIL_DETAIL = 'Auth Failed (Invalid)'
+        goto check_next_credential
+    endif
+    if result >= 7 and result <= 10 then
         LOGIN_SUCCESS = 1
-        if result = 6 then
+        if result = 7 then
             INIT_PROMPT_IDX = 1
-        elseif result = 7 then
-            INIT_PROMPT_IDX = 2
         elseif result = 8 then
+            INIT_PROMPT_IDX = 2
+        elseif result = 9 then
             INIT_PROMPT_IDX = 3
         else
             INIT_PROMPT_IDX = 5
@@ -951,67 +1010,52 @@ if result = 0 then
         goto login_success_exit
     endif
 
-    ; 応答がないため Ctrl+C (#3) で接続試行を中断し、踏み台へ安全に復帰
-    send #3
-    mpause 300
-    testlink
-    if result <> 2 goto bastion_disconnected
-    sendln 'echo "__BAS""TION_RETURN__"'
-    timeout = 5
-    wait '__BASTION_RETURN__'
-    DEV_DETAIL = 'Login Timeout'
+    ; 応答なし -> 接続試行を安全に中断して踏み台へ復帰
+    call abort_to_bastion
+    LAST_FAIL_DETAIL = 'Login Timeout'
     goto check_next_credential
 endif
 
 ; ------------------------------------------------------
 ; 【第2段階】パスワード送信後のプロンプト待機
-;   パスワード送信後にもう一度 Password: や Login invalid や denied が返ってきた場合は、
-;   「パスワード誤り」と判定し、別候補があれば次の候補を試行します。
-;   ★重要設計:
-;     Ciscoのエラーメッセージ（例: '% Login invalid'）の先頭にある '%' を
-;     プロンプトと誤認しないよう、認証失敗キーワード (assword:, invalid, denied等) を
-;     プロンプト記号よりも先に優先判定します。
+;   認証失敗キーワード (assword:, denied, invalid, failed, incorrect, sername:) を
+;   プロンプト記号 (>, #, $) より優先判定します。
+;   ※ '%' はCiscoエラーメッセージ先頭と被るため絶対に待機対象に含めません。
 ; ------------------------------------------------------
 :login_stage2_wait
 timeout = LOGIN_TIMEOUT
-; wait引数(10個):
-; 1:__BASTION_RETURN__, 2:assword:, 3:invalid, 4:denied, 5:ogin:, 6:ser:, 7:>, 8:#, 9:$, 10:]
-wait '__BASTION_RETURN__' 'assword:' 'invalid' 'denied' 'ogin:' 'ser:' '>' '#' '$' ']'
+; wait引数(10個厳守):
+; 1:__BASTION_RETURN__, 2:assword:, 3:denied, 4:invalid, 5:failed,
+; 6:incorrect, 7:sername:, 8:>, 9:#, 10:$
+wait '__BASTION_RETURN__' 'assword:' 'denied' 'invalid' 'failed' 'incorrect' 'sername:' '>' '#' '$'
 
 if result = 1 then
     ; パスワード送信直後に切断されて踏み台へ戻った
-    DEV_DETAIL = 'Auth Rejected / Closed by Host'
+    mpause 200
+    flushrecv
+    LAST_FAIL_DETAIL = 'Auth Rejected / Closed by Host'
     goto check_next_credential
 endif
 
-if result >= 2 and result <= 6 then
-    ; 認証失敗 (Password再要求、Invalid、Denied、Login要求等) -> パスワード誤りとして次候補へ
-    send #3
-    mpause 300
-    testlink
-    if result <> 2 goto bastion_disconnected
-    sendln 'echo "__BAS""TION_RETURN__"'
-    timeout = 5
-    wait '__BASTION_RETURN__'
-    DEV_DETAIL = 'Auth Failed (Wrong Password)'
+if result >= 2 and result <= 7 then
+    ; 認証失敗 (Password再要求、Permission denied、Login invalid、Auth failed、Username再要求等)
+    call abort_to_bastion
+    LAST_FAIL_DETAIL = 'Auth Failed (Wrong Password)'
     goto check_next_credential
 endif
 
-if result >= 7 and result <= 10 then
+if result >= 8 and result <= 10 then
     ; ログイン成功！対象機器のプロンプトに到達
     LOGIN_SUCCESS = 1
-    if result = 7 then
+    if result = 8 then
         ; 一般モード (>)
         INIT_PROMPT_IDX = 1
-    elseif result = 8 then
+    elseif result = 9 then
         ; 特権モード (#)
         INIT_PROMPT_IDX = 2
-    elseif result = 9 then
+    else
         ; シェルモード ($)
         INIT_PROMPT_IDX = 3
-    else
-        ; 特権ブラケット (])
-        INIT_PROMPT_IDX = 5
     endif
     IS_DEVICE_LOGGED_IN = 1
     goto login_success_exit
@@ -1023,46 +1067,35 @@ if result = 0 then
     if result <> 2 goto bastion_disconnected
     sendln ''
     timeout = 5
-    ; 1:__BASTION_RETURN__, 2:assword:, 3:invalid, 4:denied, 5:>, 6:#, 7:$, 8:]
-    wait '__BASTION_RETURN__' 'assword:' 'invalid' 'denied' '>' '#' '$' ']'
+    ; wait引数(10個厳守):
+    ; 1:__BASTION_RETURN__, 2:assword:, 3:denied, 4:invalid, 5:failed, 6:ogin:, 7:sername:, 8:>, 9:#, 10:$
+    wait '__BASTION_RETURN__' 'assword:' 'denied' 'invalid' 'failed' 'ogin:' 'sername:' '>' '#' '$'
     if result = 1 then
-        DEV_DETAIL = 'Auth Rejected / Closed by Host'
+        mpause 200
+        flushrecv
+        LAST_FAIL_DETAIL = 'Auth Rejected / Closed by Host'
         goto check_next_credential
     endif
-    if result >= 2 and result <= 4 then
-        send #3
-        mpause 300
-        testlink
-        if result <> 2 goto bastion_disconnected
-        sendln 'echo "__BAS""TION_RETURN__"'
-        timeout = 5
-        wait '__BASTION_RETURN__'
-        DEV_DETAIL = 'Auth Failed (Wrong Password)'
+    if result >= 2 and result <= 7 then
+        call abort_to_bastion
+        LAST_FAIL_DETAIL = 'Auth Failed (Wrong Password)'
         goto check_next_credential
     endif
-    if result >= 5 and result <= 8 then
+    if result >= 8 and result <= 10 then
         LOGIN_SUCCESS = 1
-        if result = 5 then
+        if result = 8 then
             INIT_PROMPT_IDX = 1
-        elseif result = 6 then
+        elseif result = 9 then
             INIT_PROMPT_IDX = 2
-        elseif result = 7 then
-            INIT_PROMPT_IDX = 3
         else
-            INIT_PROMPT_IDX = 5
+            INIT_PROMPT_IDX = 3
         endif
         IS_DEVICE_LOGGED_IN = 1
         goto login_success_exit
     endif
 
-    send #3
-    mpause 300
-    testlink
-    if result <> 2 goto bastion_disconnected
-    sendln 'echo "__BAS""TION_RETURN__"'
-    timeout = 5
-    wait '__BASTION_RETURN__'
-    DEV_DETAIL = 'Post-Auth Timeout'
+    call abort_to_bastion
+    LAST_FAIL_DETAIL = 'Post-Auth Timeout'
     goto check_next_credential
 endif
 
@@ -1073,27 +1106,16 @@ endif
 ; 両方試すモード (PROTO_DUAL_PHASE = 1: SSH失敗時) なら、同一認証情報でTelnetを試行
 if PROTO_DUAL_PHASE = 1 then
     PROTO_DUAL_PHASE = 2
-    DEV_PROTO = 'telnet'
-    AUTH_ATTEMPT = AUTH_ATTEMPT + 1
-    if AUTH_RETRY_INTERVAL > 0 then
-        pause AUTH_RETRY_INTERVAL
-    else
-        mpause 300
+    if TELNET_PORT_DEAD = 0 then
+        DEV_PROTO = 'telnet'
+        AUTH_ATTEMPT = AUTH_ATTEMPT + 1
+        goto issue_connect_cmd
     endif
-    goto issue_connect_cmd
 endif
 PROTO_DUAL_PHASE = 0
 
-; 認証失敗後の再試行ウェイト（実機のブルートフォース防御・連続失敗ロック回避）
-if AUTH_RETRY_INTERVAL > 0 then
-    pause AUTH_RETRY_INTERVAL
-else
-    mpause 300
-endif
-
 ; 1) 外部パスワードCSVファイルがすでに開いている場合は、次の行を読む
 if F_CRED_OPEN = 1 then
-    flushrecv
     goto read_cred_csv_loop
 endif
 
@@ -1103,7 +1125,6 @@ REM_U_LEN = result
 strlen REMAIN_PASS
 REM_P_LEN = result
 if REM_U_LEN > 0 or REM_P_LEN > 0 then
-    flushrecv
     goto try_inline_credential
 endif
 
@@ -1111,7 +1132,6 @@ endif
 strlen CRED_FILE
 if result > 0 and F_CRED_TRIED = 0 then
     if HAS_DEV_CRED = 0 or FALLBACK_TO_CRED_FILE = 1 then
-        flushrecv
         goto open_cred_csv_file
     endif
 endif
@@ -1121,8 +1141,16 @@ DEV_STATUS = 'NG'
 if AUTH_ATTEMPT > 1 then
     sprintf 'All %d Auth Attempts Failed' AUTH_ATTEMPT
     DEV_DETAIL = inputstr
+else
+    strlen LAST_FAIL_DETAIL
+    if result > 0 then
+        DEV_DETAIL = LAST_FAIL_DETAIL
+    else
+        DEV_DETAIL = 'Auth Failed'
+    endif
 endif
 goto record_result
+
 
 :login_success_exit
 if LOGIN_SUCCESS = 0 then
@@ -1141,37 +1169,38 @@ DEV_USER = ACTIVE_USER
 DEV_PASS = ACTIVE_PASS
 
 ; 管理者(enable)パスワードの設定
-; 外部パスワードCSV側で ACTIVE_ENPASS が指定されていればそれを優先
 strlen ACTIVE_ENPASS
 if result > 0 then
     DEV_ENPASS = ACTIVE_ENPASS
 else
-    ; 未記載時は、認証成功した通常パスワードを流用
     strlen DEV_ENPASS
     if result = 0 then
         DEV_ENPASS = ACTIVE_PASS
     endif
 endif
 
+; ログイン直後のバナー残骸をクリア
+mpause 400
+flushrecv
+
 
 ; ==============================================================================
 ; 9. 特権モード(管理者昇格)の自動適応
 ; ==============================================================================
-; 初期プロンプトが既に特権(#, ], $, %)の場合は昇格処理をスキップ
-if INIT_PROMPT_IDX >= 2 and INIT_PROMPT_IDX <= 5 goto disable_paging
+; 初期プロンプトが既に特権(#)やLinuxシェル($)の場合は昇格処理をスキップ
+if INIT_PROMPT_IDX >= 2 goto disable_paging
 
-; 踏み台との通信セッションが正常に継続しているかチェック
 testlink
 if result <> 2 goto bastion_disconnected
 
 ; 初期プロンプトが一般モード (>) の場合のみ特権昇格を試行
 sendln 'enable'
 timeout = 5
-; 引数1:__BASTION_RETURN__, 2:assword:, 3:#, 4:], 5:Invalid, 6:Unknown, 7:not found, 8:Error, 9:syntax, 10:>
+; wait引数(10個厳守):
+; 1:__BASTION_RETURN__, 2:assword:, 3:#, 4:], 5:Invalid, 6:Unknown, 7:not found, 8:Error, 9:syntax, 10:>
 wait '__BASTION_RETURN__' 'assword:' '#' ']' 'Invalid' 'Unknown' 'not found' 'Error' 'syntax' '>'
 
 if result = 1 then
-    ; 昇格試行中に相手機器から切断されて踏み台に戻った場合
     IS_DEVICE_LOGGED_IN = 0
     DEV_STATUS = 'NG'
     DEV_DETAIL = 'Disconnected During Enable'
@@ -1182,24 +1211,41 @@ elseif result = 2 then
     if result <> 2 goto bastion_disconnected
     sendln DEV_ENPASS
     timeout = 5
-    ; 1:__BASTION_RETURN__, 2:#, 3:], 4:>, 5:assword:, 6:denied, 7:Bad
-    wait '__BASTION_RETURN__' '#' ']' '>' 'assword:' 'denied' 'Bad'
+    ; wait引数(9個): 1:__BASTION_RETURN__, 2:#, 3:], 4:>, 5:assword:, 6:denied, 7:Bad, 8:Invalid, 9:failed
+    wait '__BASTION_RETURN__' '#' ']' '>' 'assword:' 'denied' 'Bad' 'Invalid' 'failed'
     if result = 1 then
         IS_DEVICE_LOGGED_IN = 0
         DEV_STATUS = 'NG'
         DEV_DETAIL = 'Disconnected During Enable Password'
         goto cleanup_done
-    elseif result >= 5 and result <= 7 then
-        ; 管理者パスワード誤り
-        DEV_DETAIL = 'Enable Password Failed'
+    elseif result >= 5 and result <= 9 then
+        ; 管理者パスワード誤り: パスワード待機プロンプトに残らないよう安全に解除
+        ENABLE_FAILED = 1
+        if result = 5 then
+            send #3
+            mpause 300
+            testlink
+            if result <> 2 goto bastion_disconnected
+            sendln ''
+            timeout = 3
+            wait '__BASTION_RETURN__' '>' '#'
+            if result = 1 then
+                IS_DEVICE_LOGGED_IN = 0
+                DEV_STATUS = 'NG'
+                DEV_DETAIL = 'Disconnected During Enable Password'
+                goto cleanup_done
+            endif
+        endif
     endif
 elseif result >= 5 and result <= 9 then
-    ; enable コマンドが拒否された場合 (Yamahaルータ等の可能性があるため administrator を試行)
+    ; enable コマンドが拒否された場合 (Yamahaルータ等のため administrator を試行)
+    mpause 200
+    flushrecv
     testlink
     if result <> 2 goto bastion_disconnected
     sendln 'administrator'
     timeout = 5
-    ; 1:__BASTION_RETURN__, 2:assword:, 3:#, 4:>, 5:$
+    ; wait引数(5個): 1:__BASTION_RETURN__, 2:assword:, 3:#, 4:>, 5:$
     wait '__BASTION_RETURN__' 'assword:' '#' '>' '$'
     if result = 1 then
         IS_DEVICE_LOGGED_IN = 0
@@ -1211,114 +1257,190 @@ elseif result >= 5 and result <= 9 then
         if result <> 2 goto bastion_disconnected
         sendln DEV_ENPASS
         timeout = 5
-        wait '__BASTION_RETURN__' '#' '>' '$'
+        ; wait引数(6個): 1:__BASTION_RETURN__, 2:#, 3:>, 4:$, 5:assword:, 6:Error
+        wait '__BASTION_RETURN__' '#' '>' '$' 'assword:' 'Error'
         if result = 1 then
             IS_DEVICE_LOGGED_IN = 0
             DEV_STATUS = 'NG'
             DEV_DETAIL = 'Disconnected During Administrator Password'
             goto cleanup_done
+        elseif result = 5 or result = 6 then
+            ENABLE_FAILED = 1
+            if result = 5 then
+                send #3
+                mpause 300
+                testlink
+                if result <> 2 goto bastion_disconnected
+                sendln ''
+                timeout = 3
+                wait '__BASTION_RETURN__' '>' '#'
+                if result = 1 then
+                    IS_DEVICE_LOGGED_IN = 0
+                    DEV_STATUS = 'NG'
+                    DEV_DETAIL = 'Disconnected During Administrator Password'
+                    goto cleanup_done
+                endif
+            endif
         endif
     endif
 endif
 
 
 ; ==============================================================================
-; 10. ページ送り抑止コマンド送信 & 機器プロンプト文字列の自動取得
+; 10. ページ送り抑止コマンド送信 & 機器プロンプト文字列の精密取得
 ; ==============================================================================
-; 【変更のポイント】新しい機種に対応させたい場合は、ここにページング無効化コマンドを追加できます。
 :disable_paging
-testlink
-if result <> 2 goto bastion_disconnected
-timeout = 2
+; Linuxシェル ($) の場合はネットワーク機器用ページングコマンドをスキップ
+if INIT_PROMPT_IDX = 3 goto detect_final_prompt
+
+timeout = 3
+; ※Ciscoエラー('% Invalid input...')に誤反応しないよう '%' は絶対に含めない
 
 ; Cisco / Allied Telesis / Alaxala / Fortinet 用
+testlink
+if result <> 2 goto bastion_disconnected
 sendln 'terminal length 0'
-wait '#' '>' '$' '%' ']'
+wait '__BASTION_RETURN__' '#' '>' '$' ']'
+if result = 1 then
+    IS_DEVICE_LOGGED_IN = 0
+    DEV_STATUS = 'NG'
+    DEV_DETAIL = 'Disconnected During Paging Disable'
+    goto cleanup_done
+endif
 
 ; Juniper JunOS 用
+testlink
+if result <> 2 goto bastion_disconnected
 sendln 'set cli screen-length 0'
-wait '#' '>' '$' '%' ']'
+wait '__BASTION_RETURN__' '#' '>' '$' ']'
+if result = 1 then
+    IS_DEVICE_LOGGED_IN = 0
+    DEV_STATUS = 'NG'
+    DEV_DETAIL = 'Disconnected During Paging Disable'
+    goto cleanup_done
+endif
 
-; Huawei VRP 用
+; Huawei VRP / H3C 用
+testlink
+if result <> 2 goto bastion_disconnected
 sendln 'screen-length 0 temporary'
-wait '#' '>' '$' '%' ']'
+wait '__BASTION_RETURN__' '#' '>' '$' ']'
+if result = 1 then
+    IS_DEVICE_LOGGED_IN = 0
+    DEV_STATUS = 'NG'
+    DEV_DETAIL = 'Disconnected During Paging Disable'
+    goto cleanup_done
+endif
 
 ; Yamaha RTX 用
+testlink
+if result <> 2 goto bastion_disconnected
 sendln 'console lines infinity'
-wait '#' '>' '$' '%' ']'
+wait '__BASTION_RETURN__' '#' '>' '$' ']'
+if result = 1 then
+    IS_DEVICE_LOGGED_IN = 0
+    DEV_STATUS = 'NG'
+    DEV_DETAIL = 'Disconnected During Paging Disable'
+    goto cleanup_done
+endif
 
-; Cisco WLC 用
-sendln 'config paging disable'
-wait '#' '>' '$' '%' ']'
 
 ; ------------------------------------------------------
-; 【プロンプト文字列の精密取得】
-;   単なる1文字（'#' や '>'）だけを待つと、コマンド出力内の '#101-Ubuntu' や
-;   '<LOOPBACK>' に反応してコマンドが暴走してしまいます。
-;   そのため、空改行を送って機器固有のプロンプト行全体（例: 'RT-CISCO-01#'）を取得します。
+; 【プロンプト文字列の精密取得・妥当性検証】
+;   1回目の空改行で機器プロンプトを出力させ、2回目の空改行でその行を改行終端させ、
+;   waitln で「機器固有の完全プロンプト文字列（例: RT-CISCO-01#）」を取得します。
+;   ※末尾文字がプロンプト記号(#, >, $, ])に一致すること・先頭がエラー記号(%, !, ^)で
+;     ないことを厳密検証し、エラー文をプロンプト誤認する事故を完全に防止します。
 ; ------------------------------------------------------
-mpause 200
+:detect_final_prompt
+mpause 500
 flushrecv
 testlink
 if result <> 2 goto bastion_disconnected
 sendln ''
+mpause 400
+testlink
+if result <> 2 goto bastion_disconnected
+sendln ''
 timeout = 3
-wait '#' '>' '$' '%' ']'
-if result = 1 then
-    PROMPT_SYMBOL = '#'
-elseif result = 2 then
-    PROMPT_SYMBOL = '>'
-elseif result = 3 then
-    PROMPT_SYMBOL = '$'
-elseif result = 4 then
-    PROMPT_SYMBOL = '%'
-elseif result = 5 then
-    PROMPT_SYMBOL = ']'
-else
-    ; タイムアウト時はログイン時に検知したプロンプト記号をフォールバック
-    if INIT_PROMPT_IDX = 1 then
+; waitln引数(4個): '%' はエラー文誤認の原因になるため絶対に含めない
+waitln '#' '>' '$' ']'
+WL_RES = result
+
+PROMPT_VALID = 0
+if WL_RES >= 1 and WL_RES <= 4 then
+    if WL_RES = 1 then
+        PROMPT_SYMBOL = '#'
+    elseif WL_RES = 2 then
         PROMPT_SYMBOL = '>'
-    elseif INIT_PROMPT_IDX = 2 then
-        PROMPT_SYMBOL = '#'
-    elseif INIT_PROMPT_IDX = 3 then
+    elseif WL_RES = 3 then
         PROMPT_SYMBOL = '$'
-    elseif INIT_PROMPT_IDX = 5 then
-        PROMPT_SYMBOL = ']'
     else
-        PROMPT_SYMBOL = '#'
+        PROMPT_SYMBOL = ']'
+    endif
+
+    TRIM_VAL = inputstr
+    call trim_string
+    CAND_PROMPT = TRIM_VAL
+
+    strlen CAND_PROMPT
+    P_LEN = result
+    if P_LEN >= 1 and P_LEN <= 40 then
+        strcopy CAND_PROMPT 1 1 P_FIRST
+        strcopy CAND_PROMPT P_LEN 1 P_LAST
+        strcompare P_LAST PROMPT_SYMBOL
+        if result = 0 then
+            P_BAD = 0
+            strcompare P_FIRST '%'
+            if result = 0 then
+                P_BAD = 1
+            endif
+            strcompare P_FIRST '!'
+            if result = 0 then
+                P_BAD = 1
+            endif
+            strcompare P_FIRST '^'
+            if result = 0 then
+                P_BAD = 1
+            endif
+            if P_BAD = 0 then
+                FINAL_PROMPT = CAND_PROMPT
+                PROMPT_VALID = 1
+            endif
+        endif
     endif
 endif
 
-if result >= 1 and result <= 5 then
-    TRIM_VAL = inputstr
-    call trim_string
-    FINAL_PROMPT = TRIM_VAL
-else
-    FINAL_PROMPT = PROMPT_SYMBOL
-endif
-
-strlen FINAL_PROMPT
-if result = 0 then
+if PROMPT_VALID = 0 then
+    ; waitln で妥当な完全プロンプトが得られなかった場合は記号フォールバック
+    if WL_RES = 0 then
+        if INIT_PROMPT_IDX = 1 then
+            PROMPT_SYMBOL = '>'
+        elseif INIT_PROMPT_IDX = 2 then
+            PROMPT_SYMBOL = '#'
+        elseif INIT_PROMPT_IDX = 3 then
+            PROMPT_SYMBOL = '$'
+        elseif INIT_PROMPT_IDX = 5 then
+            PROMPT_SYMBOL = ']'
+        else
+            PROMPT_SYMBOL = '#'
+        endif
+    endif
     FINAL_PROMPT = PROMPT_SYMBOL
 endif
 
 ; ログ開始前にバッファ内の残存プロンプトをクリア
-mpause 200
+mpause 300
 flushrecv
 
 
 ; ==============================================================================
 ; 11. クリーンログ取得開始 (logopen)
 ; ==============================================================================
-; ログイン・昇格・ページャー無効化の完了直後にログを開くことで、
-; 認証パスワード等の機微情報が含まれない「コマンド実行結果のみ」の綺麗なログを作成します。
 getdate DATE_STR '%Y%m%d_%H%M%S'
-; ログファイル名形式: ホスト名_YYYYMMDD_HHMMSS.log
 sprintf '%s\%s_%s.log' LOG_DIR DEV_NAME DATE_STR
 LOG_FILE = inputstr
 
-; 既存ログがあれば閉じてから新規オープン
-; （※Tera Term 4.02 では logopen 直後の result が更新されないため、無条件で成功フラグを立てます）
 logclose
 logopen LOG_FILE 0 0
 IS_LOG_OPEN = 1
@@ -1343,15 +1465,15 @@ endif
 
 :read_cmd_loop
 filereadln f_cmd cmd_line
-if result = 1 goto end_cmd_loop     ; コマンド定義ファイルの末尾(EOF)到達
+if result = 1 goto end_cmd_loop
 
-; コマンド行の前後空白をトリム
+; コマンド行の前後空白・BOMをトリム
 TRIM_VAL = cmd_line
 call trim_string
 cmd_line = TRIM_VAL
 
 strlen cmd_line
-if result = 0 goto read_cmd_loop    ; 空行スキップ
+if result = 0 goto read_cmd_loop
 
 ; コメント行 (セミコロン ; または シャープ #) はスキップ
 strcopy cmd_line 1 1 c_char
@@ -1360,7 +1482,7 @@ if result = 0 goto read_cmd_loop
 strcompare c_char '#'
 if result = 0 goto read_cmd_loop
 
-; ログ内に実行コマンドの見出しをわかりやすく記録
+; ログ内に実行コマンドの見出しを記録
 logwrite #13#10
 logwrite '==================== [ '
 logwrite cmd_line
@@ -1375,25 +1497,25 @@ sendln cmd_line
 ; コマンド実行結果の待機ループ (ページング表示 --More-- の自動解除 & 途中切断検知)
 :wait_cmd_prompt
 timeout = CMD_TIMEOUT
-; wait 最大10引数厳守 (10個):
-; 1:FINAL_PROMPT, 2:PROMPT_SYMBOL, 3:--More--, 4:-- More --, 5:---(more, 6:More:, 7:続く, 8:RETURN, 9:any key, 10:__BASTION_RETURN__
-wait FINAL_PROMPT PROMPT_SYMBOL '--More--' '-- More --' '---(more' 'More:' '続く' 'RETURN' 'any key' '__BASTION_RETURN__'
+; wait 最大10引数厳守 (9個):
+; 1:FINAL_PROMPT, 2:--More--, 3:-- More --, 4:---(more, 5:More:, 6:続く, 7:RETURN, 8:any key, 9:__BASTION_RETURN__
+wait FINAL_PROMPT '--More--' '-- More --' '---(more' 'More:' '続く' 'RETURN' 'any key' '__BASTION_RETURN__'
 
-if result = 1 or result = 2 goto read_cmd_loop    ; 機器プロンプトに戻ったので次のコマンドへ
+if result = 1 goto read_cmd_loop
 
-if result >= 3 and result <= 7 then
+if result >= 2 and result <= 6 then
     ; ページャー表示(--More--等)が出現したため、スペースキーを送信して続きを表示
     send ' '
     goto wait_cmd_prompt
 endif
 
-if result >= 8 and result <= 9 then
+if result >= 7 and result <= 8 then
     ; RETURN / any key 表示が出現したため、Enterキーを送信
     sendln ''
     goto wait_cmd_prompt
 endif
 
-if result = 10 then
+if result = 9 then
     ; コマンド実行中に相手機器から切断されて踏み台に戻った場合
     fileclose f_cmd
     IS_DEVICE_LOGGED_IN = 0
@@ -1401,13 +1523,26 @@ if result = 10 then
     goto cleanup_done
 endif
 
-; タイムアウト時は次のコマンドへ進む
+; タイムアウト時: 空Enterを1回送ってプロンプト復帰を確認（モード変化時の救済）
+testlink
+if result <> 2 goto bastion_disconnected
+sendln ''
+timeout = 3
+wait FINAL_PROMPT PROMPT_SYMBOL '__BASTION_RETURN__'
+if result = 3 then
+    fileclose f_cmd
+    IS_DEVICE_LOGGED_IN = 0
+    DEV_DETAIL = 'Disconnected During Command'
+    goto cleanup_done
+endif
 goto read_cmd_loop
 
 :end_cmd_loop
 fileclose f_cmd
 DEV_STATUS = 'OK'
-if AUTH_ATTEMPT > 1 then
+if ENABLE_FAILED = 1 then
+    DEV_DETAIL = 'Success (Enable Failed - User Mode)'
+elseif AUTH_ATTEMPT > 1 then
     sprintf 'Success (Candidate #%d matched)' AUTH_ATTEMPT
     DEV_DETAIL = inputstr
 else
@@ -1418,32 +1553,23 @@ endif
 ; ==============================================================================
 ; 13. 対象機器からの安全切断 (踏み台セッション完全保護)
 ; ==============================================================================
-; 【重要設計】
-;   以前は '>' や ']' を wait していたため、コマンド出力の残り文字に反応して
-;   2回目の exit が踏み台シェルに誤送信され、踏み台ごと切断される原因になっていました。
-;   本バージョンでは踏み台復帰マーカー '__BASTION_RETURN__' のみを判定基準とするため、
-;   踏み台シェルに対して誤って exit を送ることは絶対にありません。
-; ==============================================================================
 :cleanup_device
-; コマンド収集完了後、ログアウト操作がログに混入しないよう先にログをクローズ
 if IS_LOG_OPEN = 1 then
     logclose
     IS_LOG_OPEN = 0
 endif
 
 if IS_DEVICE_LOGGED_IN = 1 then
-    ; 踏み台との通信セッションが正常に継続しているかチェック
     testlink
     if result <> 2 goto bastion_disconnected
 
-    ; コマンド出力の残骸を完全にフラッシュ
     mpause 300
     flushrecv
 
     ; 1) 対象機器へのログアウトコマンド (exit) を送信
     sendln 'exit'
     timeout = 7
-    ; 引数(5個): 1:__BASTION_RETURN__, 2:Save new configuration ? (y/n), 3:Save? [yes/no], 4:(y/n), 5:[y/n]
+    ; wait引数(5個): 1:__BASTION_RETURN__, 2:Save new configuration ? (y/n), 3:Save? [yes/no], 4:(y/n), 5:[y/n]
     wait '__BASTION_RETURN__' 'Save new configuration ? (y/n)' 'Save? [yes/no]' '(y/n)' '[y/n]'
     if result = 1 goto cleanup_done
     if result >= 2 and result <= 5 then
@@ -1464,29 +1590,33 @@ if IS_DEVICE_LOGGED_IN = 1 then
     wait '__BASTION_RETURN__'
     if result = 1 goto cleanup_done
 
-    ; 3) それでも戻らない場合、Ctrl+C (#3) で安全に中断しマーカーで同期
-    send #3
-    mpause 300
-    testlink
-    if result <> 2 goto bastion_disconnected
-    sendln 'echo "__BAS""TION_RETURN__"'
-    timeout = 5
-    wait '__BASTION_RETURN__'
+    ; 3) それでも戻らない場合、プロトコル別の安全な強制離脱を実行
+    strcompare DEV_PROTO 'ssh'
+    if result = 0 then
+        ; OpenSSH のエスケープシーケンス (Enter + ~.) でネストSSHのみを安全に切断
+        ; ※万一すでに踏み台に戻っていても bash では '~.: command not found' となるだけで無害
+        testlink
+        if result <> 2 goto bastion_disconnected
+        sendln ''
+        mpause 200
+        send '~.'
+        timeout = 3
+        wait '__BASTION_RETURN__'
+        if result = 1 goto cleanup_done
+    endif
+    call abort_to_bastion
 endif
 
 :cleanup_done
 IS_DEVICE_LOGGED_IN = 0
-; 外部パスワードファイルが開いていればクローズ
 if F_CRED_OPEN = 1 then
     fileclose f_cred
     F_CRED_OPEN = 0
 endif
 
-; 次の機器の処理に影響しないよう、踏み台プロンプトの残存バッファをクリア
 mpause 200
 flushrecv
 
-; 異常系ジャンプ等で万一ログが開いたままならクローズ
 if IS_LOG_OPEN = 1 then
     logclose
     IS_LOG_OPEN = 0
@@ -1497,7 +1627,6 @@ endif
 ; 14. サマリCSVへの追記
 ; ==============================================================================
 :record_result
-; 外部パスワードファイルが開いていればクローズ
 if F_CRED_OPEN = 1 then
     fileclose f_cred
     F_CRED_OPEN = 0
@@ -1506,7 +1635,6 @@ endif
 strcompare DEV_STATUS 'OK'
 if result = 0 then
     OK_COUNT = OK_COUNT + 1
-    ; ログイン成功時は解決済みアカウント一覧CSVに追記
     fileopen f_res RESOLVED_FILE 1
     if f_res <> -1 then
         sprintf '%s,%s,%s,%s,%s' DEV_NAME DEV_IP DEV_USER DEV_PROTO DEV_STATUS
@@ -1536,7 +1664,7 @@ goto read_csv_loop
 
 
 ; ==============================================================================
-; 15. 全機器終了処理 & 完了サマリ通知
+; 15. 全機器終了処理 & 完了サマリ通知 (全メッセージ255バイト制限厳守)
 ; ==============================================================================
 :end_csv_loop
 if F_CRED_OPEN = 1 then
@@ -1545,67 +1673,39 @@ if F_CRED_OPEN = 1 then
 endif
 fileclose f_csv
 
-; マクロ側で新規に踏み台へ接続した場合のみログアウト（既存接続利用時は画面を残す）
 if ALREADY_CONNECTED = 0 then
     sendln 'exit'
     disconnect 0
 endif
 
-; 手動実行時のみ完了ポップアップを表示 (自動実行時はサイレント終了)
 if paramcnt < 3 then
     if NG_COUNT = 0 then
-        sprintf 'すべての機器のログ収集が正常に完了しました！'
-        DLG_MSG = inputstr
+        DLG_MSG = 'ログ収集完了 (全件成功)'
         strconcat DLG_MSG CRLF
-        strconcat DLG_MSG CRLF
-        sprintf '■ 実行結果: 全 %d 台中  成功: %d 台 / 失敗: %d 台' TOTAL_COUNT OK_COUNT NG_COUNT
+        sprintf '結果: 全 %d 台 (成功 %d / 失敗 %d)' TOTAL_COUNT OK_COUNT NG_COUNT
         strconcat DLG_MSG inputstr
         strconcat DLG_MSG CRLF
-        strconcat DLG_MSG CRLF
-        strconcat DLG_MSG '■ サマリCSV:'
+        strconcat DLG_MSG 'サマリCSV:'
         strconcat DLG_MSG CRLF
         strconcat DLG_MSG SUMMARY_FILE
-        strconcat DLG_MSG CRLF
-        strconcat DLG_MSG CRLF
-        strconcat DLG_MSG '■ ログ保存先フォルダ:'
-        strconcat DLG_MSG CRLF
-        strconcat DLG_MSG LOG_DIR
-        messagebox DLG_MSG 'ログ収集完了 (全件成功)'
+        messagebox DLG_MSG '完了 (全件成功)'
     else
-        sprintf 'ログ収集処理が完了しました（一部または全件で接続エラーがあります）。'
-        DLG_MSG = inputstr
+        DLG_MSG = 'ログ収集完了 (一部エラーあり)'
         strconcat DLG_MSG CRLF
-        strconcat DLG_MSG CRLF
-        sprintf '■ 実行結果: 全 %d 台中  成功: %d 台 / 失敗: %d 台' TOTAL_COUNT OK_COUNT NG_COUNT
+        sprintf '結果: 全 %d 台 (成功 %d / 失敗 %d)' TOTAL_COUNT OK_COUNT NG_COUNT
         strconcat DLG_MSG inputstr
         strconcat DLG_MSG CRLF
-        strconcat DLG_MSG CRLF
-        strconcat DLG_MSG '■ 失敗がある場合のチェックポイント:'
-        strconcat DLG_MSG CRLF
-        strconcat DLG_MSG '  1. device.csv 内のIPアドレス・ユーザー名・パスワードが実機と合っているか'
-        strconcat DLG_MSG CRLF
-        strconcat DLG_MSG '     （初期状態ではサンプル用の架空IPが記載されています）'
-        strconcat DLG_MSG CRLF
-        strconcat DLG_MSG '  2. サマリCSVの「Detail」列に記載された失敗理由をご確認ください:'
-        strconcat DLG_MSG CRLF
-        strconcat DLG_MSG '     - Connection Failed / Unreachable : IP誤り・電源断・経路なし'
-        strconcat DLG_MSG CRLF
-        strconcat DLG_MSG '     - Auth Failed / Auth Attempts Failed : パスワード誤りまたは実機ロック'
-        strconcat DLG_MSG CRLF
-        strconcat DLG_MSG '     - SSH Algorithm Mismatch : 古い機器のため SSH_EXTRA_OPTS の有効化が必要'
-        strconcat DLG_MSG CRLF
-        strconcat DLG_MSG CRLF
-        strconcat DLG_MSG '■ サマリCSV:'
+        strconcat DLG_MSG '失敗理由はサマリCSVのDetail列を確認:'
         strconcat DLG_MSG CRLF
         strconcat DLG_MSG SUMMARY_FILE
-        messagebox DLG_MSG 'ログ収集完了 (要確認あり)'
+        messagebox DLG_MSG '完了 (要確認あり)'
     endif
 endif
 end
 
 
 ; ==============================================================================
-; 【異常系ハンドラ】踏み台サーバとの通信セッション切断時
+; 【異常系ハンドラ】踏み台サーバとの通信セッション切断時 (255バイト制限厳守)
 ; ==============================================================================
 :bastion_disconnected
 if IS_LOG_OPEN = 1 then
@@ -1618,57 +1718,77 @@ if F_CRED_OPEN = 1 then
 endif
 fileclose f_csv
 
-ERROR_MSG = '【踏み台サーバとの接続が切断されました】'
+ERROR_MSG = '踏み台サーバとの接続が切断されました。'
 strconcat ERROR_MSG CRLF
-strconcat ERROR_MSG CRLF
-strconcat ERROR_MSG '■ 発生状況:'
-strconcat ERROR_MSG CRLF
-sprintf '  処理中だった機器: %s (IP: %s)' DEV_NAME DEV_IP
+sprintf '対象: %s (%s)' DEV_NAME DEV_IP
 strconcat ERROR_MSG inputstr
 strconcat ERROR_MSG CRLF
-sprintf '  プロトコル: %s / ステータス: %s (%s)' DEV_PROTO DEV_STATUS DEV_DETAIL
-strconcat ERROR_MSG inputstr
+strconcat ERROR_MSG '原因: 無通信切断(TMOUT)や通信断等'
 strconcat ERROR_MSG CRLF
-strconcat ERROR_MSG CRLF
-strconcat ERROR_MSG '--------------------------------------------------'
-strconcat ERROR_MSG CRLF
-strconcat ERROR_MSG '【エラーの原因と確認・対処いただきたいポイント】'
-strconcat ERROR_MSG CRLF
-strconcat ERROR_MSG CRLF
-strconcat ERROR_MSG '1. device.csv のIPアドレスが実在し、到達可能か確認'
-strconcat ERROR_MSG CRLF
-strconcat ERROR_MSG '   サンプルの架空IP (192.168.10.x) のまま実行している場合、'
-strconcat ERROR_MSG CRLF
-strconcat ERROR_MSG '   接続待ちでタイムアウトが連続し、踏み台セッションが切断されます。'
-strconcat ERROR_MSG CRLF
-strconcat ERROR_MSG '   実在する対象機器のIPアドレスに変更してください。'
-strconcat ERROR_MSG CRLF
-strconcat ERROR_MSG CRLF
-strconcat ERROR_MSG '2. 踏み台サーバ側の自動切断設定 (TMOUT / ClientAlive)'
-strconcat ERROR_MSG CRLF
-strconcat ERROR_MSG '   踏み台サーバ側の環境変数 TMOUT や sshd の設定により、'
-strconcat ERROR_MSG CRLF
-strconcat ERROR_MSG '   一定時間の無通信や待機で自動ログアウトされた可能性があります。'
-strconcat ERROR_MSG CRLF
-strconcat ERROR_MSG CRLF
-strconcat ERROR_MSG '3. ネットワーク・VPN接続の健全性'
-strconcat ERROR_MSG CRLF
-strconcat ERROR_MSG '   PCから踏み台サーバへのネットワークやVPN接続が切れていないか'
-strconcat ERROR_MSG CRLF
-strconcat ERROR_MSG '   ご確認ください。'
-strconcat ERROR_MSG CRLF
-strconcat ERROR_MSG '--------------------------------------------------'
-strconcat ERROR_MSG CRLF
-strconcat ERROR_MSG '※切断直前までの実行結果は以下に保存されています:'
+strconcat ERROR_MSG '途中結果:'
 strconcat ERROR_MSG CRLF
 strconcat ERROR_MSG SUMMARY_FILE
 
-messagebox ERROR_MSG '踏み台通信切断エラー (原因と対処方法)'
+messagebox ERROR_MSG '踏み台切断エラー'
 end
 
 
 ; ==============================================================================
-; サブルーチン1: 4.0x互換 CSV行パーサー (7列対応・strsplit完全代替・前後空白除去)
+; サブルーチン0: 認証失敗・タイムアウト時の安全な踏み台復帰 (SSH / Telnet両対応)
+; ==============================================================================
+:abort_to_bastion
+    ; 1) まずSSH/Telnetが自然に終了して踏み台へ戻ってくるのを短時間待機
+    timeout = 2
+    wait '__BASTION_RETURN__'
+    if result = 1 then
+        mpause 200
+        flushrecv
+        return
+    endif
+
+    ; 2) まだ接続が残っている場合、プロトコルに応じた安全な切断コマンドを送信
+    strcompare DEV_PROTO 'telnet'
+    if result = 0 then
+        ; Telnet は Ctrl+C では終了しないため、エスケープ文字 Ctrl+] (#29) + quit で確実に終了
+        send #29
+        mpause 300
+        testlink
+        if result <> 2 goto bastion_disconnected
+        sendln 'quit'
+        timeout = 3
+        wait '__BASTION_RETURN__'
+        if result = 1 then
+            mpause 200
+            flushrecv
+            return
+        endif
+    else
+        ; SSH は Ctrl+C (#3) で認証試行を中断
+        send #3
+        mpause 300
+        timeout = 2
+        wait '__BASTION_RETURN__'
+        if result = 1 then
+            mpause 200
+            flushrecv
+            return
+        endif
+    endif
+
+    ; 3) 踏み台復帰マーカーと衝突しない別マーカー (__BASTION_SYNC__) で踏み台シェル復帰を確認
+    testlink
+    if result <> 2 goto bastion_disconnected
+    flushrecv
+    sendln 'echo "__BAS""TION_SYNC__"'
+    timeout = 5
+    wait '__BASTION_SYNC__'
+    mpause 200
+    flushrecv
+return
+
+
+; ==============================================================================
+; サブルーチン1: 4.0x互換 CSV行パーサー (7列対応・空末尾完全対応・前後空白除去)
 ; ==============================================================================
 :parse_csv_line
     COL1 = ''
@@ -1693,7 +1813,11 @@ end
     START_POS = POS + 1
     strlen PARSE_STR
     REM_LEN = result - POS
-    strcopy PARSE_STR START_POS REM_LEN PARSE_STR
+    if REM_LEN > 0 then
+        strcopy PARSE_STR START_POS REM_LEN PARSE_STR
+    else
+        PARSE_STR = ''
+    endif
 
     ; 2列目 (IPアドレス)
     strscan PARSE_STR ','
@@ -1708,7 +1832,11 @@ end
     START_POS = POS + 1
     strlen PARSE_STR
     REM_LEN = result - POS
-    strcopy PARSE_STR START_POS REM_LEN PARSE_STR
+    if REM_LEN > 0 then
+        strcopy PARSE_STR START_POS REM_LEN PARSE_STR
+    else
+        PARSE_STR = ''
+    endif
 
     ; 3列目 (ユーザー名)
     strscan PARSE_STR ','
@@ -1723,7 +1851,11 @@ end
     START_POS = POS + 1
     strlen PARSE_STR
     REM_LEN = result - POS
-    strcopy PARSE_STR START_POS REM_LEN PARSE_STR
+    if REM_LEN > 0 then
+        strcopy PARSE_STR START_POS REM_LEN PARSE_STR
+    else
+        PARSE_STR = ''
+    endif
 
     ; 4列目 (パスワード)
     strscan PARSE_STR ','
@@ -1738,7 +1870,11 @@ end
     START_POS = POS + 1
     strlen PARSE_STR
     REM_LEN = result - POS
-    strcopy PARSE_STR START_POS REM_LEN PARSE_STR
+    if REM_LEN > 0 then
+        strcopy PARSE_STR START_POS REM_LEN PARSE_STR
+    else
+        PARSE_STR = ''
+    endif
 
     ; 5列目 (管理者パスワード)
     strscan PARSE_STR ','
@@ -1753,7 +1889,11 @@ end
     START_POS = POS + 1
     strlen PARSE_STR
     REM_LEN = result - POS
-    strcopy PARSE_STR START_POS REM_LEN PARSE_STR
+    if REM_LEN > 0 then
+        strcopy PARSE_STR START_POS REM_LEN PARSE_STR
+    else
+        PARSE_STR = ''
+    endif
 
     ; 6列目 (プロトコル: ssh / telnet)
     strscan PARSE_STR ','
@@ -1768,7 +1908,11 @@ end
     START_POS = POS + 1
     strlen PARSE_STR
     REM_LEN = result - POS
-    strcopy PARSE_STR START_POS REM_LEN PARSE_STR
+    if REM_LEN > 0 then
+        strcopy PARSE_STR START_POS REM_LEN PARSE_STR
+    else
+        PARSE_STR = ''
+    endif
 
     ; 7列目 (コマンドファイル名)
     COL7 = PARSE_STR
@@ -1798,7 +1942,6 @@ end
     COL6 = PARSE_STR
 
     :parse_assign
-    ; 各列の前後の空白・タブ・クォートを綺麗に除去
     TRIM_VAL = COL1
     call trim_string
     DEV_NAME = TRIM_VAL
@@ -1830,9 +1973,25 @@ return
 
 
 ; ==============================================================================
-; サブルーチン2: 文字列前後トリム処理 (空白・タブ・CR・LF・ダブルクォート除去)
+; サブルーチン2: 文字列前後トリム処理 (空白・タブ・CR・LF・クォート・UTF-8 BOM除去)
 ; ==============================================================================
 :trim_string
+    ; UTF-8 BOM (EF BB BF) が先頭に付いていれば除去
+    strlen TRIM_VAL
+    if result >= 3 then
+        strcopy TRIM_VAL 1 3 T_BOM
+        strcompare T_BOM #239#187#191
+        if result = 0 then
+            strlen TRIM_VAL
+            T_REM = result - 3
+            if T_REM > 0 then
+                strcopy TRIM_VAL 4 T_REM TRIM_VAL
+            else
+                TRIM_VAL = ''
+            endif
+        endif
+    endif
+
     :trim_lead_loop
     strlen TRIM_VAL
     T_LEN = result
@@ -1957,7 +2116,6 @@ return
         endif
     endif
 
-    ; トリム処理
     TRIM_VAL = NEXT_U
     call trim_string
     NEXT_U = TRIM_VAL
@@ -1966,7 +2124,6 @@ return
     call trim_string
     NEXT_P = TRIM_VAL
 
-    ; ユーザー名・パスワードが共に空なら候補終了
     strlen NEXT_U
     U_LEN = result
     strlen NEXT_P
@@ -2023,7 +2180,6 @@ return
         CURR_PASS = NEXT_P
     endif
 
-    ; 各要素のトリム
     TRIM_VAL = CURR_USER
     call trim_string
     CURR_USER = TRIM_VAL
@@ -2032,7 +2188,6 @@ return
     call trim_string
     CURR_PASS = TRIM_VAL
 
-    ; ユーザー名が未指定の場合は前回のユーザー名を流用（初回なら踏み台ユーザー名）
     strlen CURR_USER
     if result = 0 then
         strlen LAST_USER
@@ -2045,7 +2200,6 @@ return
         LAST_USER = CURR_USER
     endif
 
-    ; パスワードが未指定の場合は前回のパスワードを流用（初回なら踏み台パスワード）
     strlen CURR_PASS
     if result = 0 then
         strlen LAST_PASS
@@ -2063,7 +2217,7 @@ return
 
 
 ; ==============================================================================
-; サブルーチン4: 外部パスワードCSV行パーサー (ユーザー名, パスワード, 管理者パスワード, プロトコル)
+; サブルーチン4: 外部パスワードCSV行パーサー (ユーザー名, パスワード, 管理者PW, プロトコル)
 ; 入力: PARSE_CRED_STR
 ; 出力: C_USER, C_PASS, C_ENPASS, C_PROTO
 ; ==============================================================================
@@ -2073,7 +2227,7 @@ return
     C_ENPASS = ''
     C_PROTO = ''
 
-    ; 1列目 (ユーザー名) の切り出し
+    ; 1列目 (ユーザー名)
     strscan PARSE_CRED_STR ','
     if result = 0 then
         C_USER = PARSE_CRED_STR
@@ -2095,7 +2249,7 @@ return
         PARSE_CRED_STR = ''
     endif
 
-    ; 2列目 (パスワード) の切り出し
+    ; 2列目 (パスワード)
     strscan PARSE_CRED_STR ','
     if result = 0 then
         C_PASS = PARSE_CRED_STR
@@ -2117,7 +2271,7 @@ return
         PARSE_CRED_STR = ''
     endif
 
-    ; 3列目 (管理者パスワード) と 4列目 (プロトコル) の切り出し
+    ; 3列目 (管理者パスワード) & 4列目 (プロトコル)
     strscan PARSE_CRED_STR ','
     if result = 0 then
         C_ENPASS = PARSE_CRED_STR
@@ -2139,6 +2293,17 @@ return
         C_PROTO = ''
     endif
 
+    ; 4列目の後ろに余分なカンマがあれば切り捨て
+    strscan C_PROTO ','
+    if result > 0 then
+        PC_CUT = result - 1
+        if PC_CUT > 0 then
+            strcopy C_PROTO 1 PC_CUT C_PROTO
+        else
+            C_PROTO = ''
+        endif
+    endif
+
     :parse_cred_assign
     TRIM_VAL = C_USER
     call trim_string
@@ -2155,4 +2320,32 @@ return
     TRIM_VAL = C_PROTO
     call trim_string
     C_PROTO = TRIM_VAL
+return
+
+
+; ==============================================================================
+; サブルーチン5: プロトコル文字列の小文字正規化 ('ssh' / 'telnet' / '')
+; 入力/出力: NORM_PROTO
+; ==============================================================================
+:normalize_proto
+    strcompare NORM_PROTO 'SSH'
+    if result = 0 then
+        NORM_PROTO = 'ssh'
+        return
+    endif
+    strcompare NORM_PROTO 'Ssh'
+    if result = 0 then
+        NORM_PROTO = 'ssh'
+        return
+    endif
+    strcompare NORM_PROTO 'TELNET'
+    if result = 0 then
+        NORM_PROTO = 'telnet'
+        return
+    endif
+    strcompare NORM_PROTO 'Telnet'
+    if result = 0 then
+        NORM_PROTO = 'telnet'
+        return
+    endif
 return

@@ -311,6 +311,9 @@ class TTLEngine:
             lines = self.stream_buffer.splitlines(keepends=True)
             consumed_len = 0
             for line in lines:
+                # Real Tera Term waitln requires a line break (CR/LF) at the end of the line
+                if not line.endswith(("\n", "\r")):
+                    break
                 consumed_len += len(line)
                 line_clean = line.rstrip("\r\n")
                 if not line_clean:
@@ -381,7 +384,11 @@ class TTLEngine:
                     self.vars[line_var] = ""
                 else:
                     self.vars["result"] = 0
-                    self.vars[line_var] = line.rstrip("\r\n")
+                    val = line.rstrip("\r\n")
+                    # Simulate Tera Term 4.x raw-byte UTF-8 BOM (EF BB BF)
+                    if val.startswith("\ufeff"):
+                        val = "\xef\xbb\xbf" + val[1:]
+                    self.vars[line_var] = val
             else:
                 self.vars["result"] = 1
             self.pc += 1

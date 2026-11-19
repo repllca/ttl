@@ -443,6 +443,143 @@ class TestEndToEndSimulation(unittest.TestCase):
             if os.path.exists(temp_dev):
                 os.remove(temp_dev)
 
+    def test_telnet_only_cisco_dual_protocol_and_ctrl_bracket_recovery(self):
+        """
+        Verify realistic Cisco Telnet-only device (192.168.10.252):
+        - SSH port 22 returns Connection refused -> sets SSH_PORT_DEAD and skips subsequent SSH rows
+        - Telnet prompts 'Username: ' (NOT 'login:'), rejects wrong PW with '% Authentication failed'
+          and does NOT exit on Ctrl+C -> macro cleanly exits via Ctrl+] (#29) + quit
+        - Succeeds on valid account, enters enable, ignores '% Invalid input' during disable_paging,
+          captures exact 'TELNET-CISCO#' prompt, and runs commands cleanly without 30s timeout.
+        """
+        import tempfile
+        logs_dir = os.path.join(WORKSPACE_DIR, "logs")
+        if os.path.exists(logs_dir):
+            import shutil
+            shutil.rmtree(logs_dir)
+
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", dir=WORKSPACE_DIR, delete=False, encoding="utf-8") as tf_cred:
+            tf_cred.write(
+                "# ユーザー名,パスワード,管理者パスワード,プロトコル\n"
+                "ssh_only_1, Pass1234 , EnablePass123 , SSH\n"
+                "ssh_only_2, Pass1234 , EnablePass123 , ssh\n"
+                "wrong_user, WRONG_PASS , , TELNET\n"
+                "admin, WRONG_PASS , , \n"
+                "admin, Pass1234 , EnablePass123 , \n"
+            )
+            temp_cred = tf_cred.name
+
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", dir=WORKSPACE_DIR, delete=False, encoding="utf-8") as tf_dev:
+            tf_dev.write(
+                "# ホスト名,IPアドレス,ユーザー名,パスワード,管理者パスワード,プロトコル,コマンドファイル\n"
+                "CISCO-TELNET-01, 192.168.10.252 , , , , , commands_cisco.txt\n"
+            )
+            temp_dev = tf_dev.name
+
+        try:
+            session = MockSession()
+            engine = TTLEngine(
+                WORKSPACE_DIR,
+                session,
+                params=["device_runner.ttl", "logs", "mock_pass", temp_dev, temp_cred]
+            )
+            engine.load_script(TTL_FILE)
+            engine.run()
+
+            summary_files = glob.glob(os.path.join(logs_dir, "summary_*.csv"))
+            self.assertGreater(len(summary_files), 0)
+            with open(summary_files[-1], "r", encoding="utf-8") as f:
+                content = f.read()
+
+            lines = [l for l in content.splitlines() if l.strip() and not l.startswith("Timestamp")]
+            self.assertEqual(len(lines), 1)
+            parts = lines[0].split(",")
+            self.assertEqual(parts[1], "CISCO-TELNET-01")
+            self.assertEqual(parts[3], "telnet")
+            self.assertEqual(parts[4], "#")
+            self.assertEqual(parts[5], "OK")
+            self.assertEqual(parts[7], "admin")
+            # Confirm FINAL_PROMPT was captured accurately (NOT '% Invalid input...')
+            self.assertEqual(engine.vars.get("FINAL_PROMPT"), "TELNET-CISCO#")
+        finally:
+            if os.path.exists(temp_cred):
+                os.remove(temp_cred)
+            if os.path.exists(temp_dev):
+                os.remove(temp_dev)
+
+    def test_dual_protocol_inline_and_wrong_enable_and_bom_trailing_commas(self):
+        """
+        Verify:
+        - UTF-8 BOM at top of device.csv and credentials.csv is cleanly stripped
+        - Trailing empty columns (e.g. 'BOM-NODE,192.168.10.1,,,,,') do not corrupt DEV_CMD
+        - Inline credentials with empty protocol automatically try SSH -> refused -> Telnet
+        - Wrong enable password does NOT leave macro stuck at enable Password prompt
+        """
+        import tempfile
+        logs_dir = os.path.join(WORKSPACE_DIR, "logs")
+        if os.path.exists(logs_dir):
+            import shutil
+            shutil.rmtree(logs_dir)
+
+        with tempfile.NamedTemporaryFile("wb", suffix=".csv", dir=WORKSPACE_DIR, delete=False) as tf_cred:
+            # Write with UTF-8 BOM
+            tf_cred.write(
+                b"\xef\xbb\xbf"
+                + (
+                    "admin, Pass1234 , EnablePass123 , ssh,\n"
+                ).encode("utf-8")
+            )
+            temp_cred = tf_cred.name
+
+        with tempfile.NamedTemporaryFile("wb", suffix=".csv", dir=WORKSPACE_DIR, delete=False) as tf_dev:
+            tf_dev.write(
+                b"\xef\xbb\xbf"
+                + (
+                    "BOM-TRAILING-01,192.168.10.1,,,,,\n"
+                    "INLINE-DUAL-01,192.168.10.252,admin,Pass1234,EnablePass123,,commands_cisco.txt\n"
+                    "BAD-ENABLE-01,192.168.10.1,admin,Pass1234,WRONG_ENPASS,ssh,commands_cisco.txt\n"
+                ).encode("utf-8")
+            )
+            temp_dev = tf_dev.name
+
+        try:
+            session = MockSession()
+            engine = TTLEngine(
+                WORKSPACE_DIR,
+                session,
+                params=["device_runner.ttl", "logs", "mock_pass", temp_dev, temp_cred]
+            )
+            engine.load_script(TTL_FILE)
+            engine.run()
+
+            summary_files = glob.glob(os.path.join(logs_dir, "summary_*.csv"))
+            self.assertGreater(len(summary_files), 0)
+            with open(summary_files[-1], "r", encoding="utf-8") as f:
+                content = f.read()
+
+            lines = [l for l in content.splitlines() if l.strip() and not l.startswith("Timestamp")]
+            self.assertEqual(len(lines), 3, f"Expected 3 rows, got: {lines}")
+            res = {l.split(",")[1]: l.split(",") for l in lines}
+
+            # 1. BOM + trailing empty columns -> uses universal commands & credentials.csv cleanly
+            self.assertEqual(res["BOM-TRAILING-01"][5], "OK")
+            self.assertEqual(res["BOM-TRAILING-01"][3], "ssh")
+            self.assertEqual(res["BOM-TRAILING-01"][7], "admin")
+
+            # 2. Inline creds + empty protocol on telnet-only Cisco -> SSH refused -> Telnet OK!
+            self.assertEqual(res["INLINE-DUAL-01"][5], "OK")
+            self.assertEqual(res["INLINE-DUAL-01"][3], "telnet")
+
+            # 3. Wrong enable password -> cleanly cancels Password prompt, finishes in user mode (>)
+            self.assertEqual(res["BAD-ENABLE-01"][5], "OK")
+            self.assertEqual(res["BAD-ENABLE-01"][4], ">")
+            self.assertIn("Enable Failed", res["BAD-ENABLE-01"][6])
+        finally:
+            if os.path.exists(temp_cred):
+                os.remove(temp_cred)
+            if os.path.exists(temp_dev):
+                os.remove(temp_dev)
+
 
 if __name__ == "__main__":
     unittest.main()

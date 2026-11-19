@@ -1,16 +1,19 @@
 """
 Mock network environment simulating Bastion host and multi-vendor target devices:
-- Bastion Linux shell (supports '; echo "__BAS""TION_RETURN__"' command chaining)
+- Bastion Linux shell (supports '; echo "__BAS""TION_RETURN__"' & '__BASTION_SYNC__')
+- Proper input buffering for split 'send' + 'sendln' sequences
 - Pre-authentication banners containing '#', '>', '$', ']' to test banner resilience
-- Cisco IOS (User exec, enable escalation, --More-- paging, '#' comments in config)
+- Cisco IOS (User exec, enable escalation, '% Invalid input' on unknown paging cmds, --More-- paging, '#' comments in config)
 - Yamaha router (User exec, enable rejection, administrator escalation)
-- Juniper Junos (% shell)
+- Juniper Junos (> prompt)
 - Linux server ($ prompt, '#101-Ubuntu' in uname -a, '<LOOPBACK>' in ip addr)
-- Legacy Telnet switch
+- Legacy Telnet switch (192.168.10.5)
+- Telnet-only Cisco switch (192.168.10.252: SSH port 22 refused, Telnet port 23 prompts 'Username: ' and requires Ctrl+] + quit on auth fail)
 - Error scenarios:
-  - 192.168.10.254 : Connection refused / unreachable
+  - 192.168.10.254 : Connection refused / unreachable (both SSH and Telnet)
   - 192.168.10.253 : SSH KexAlgorithms / HostKeyAlgorithms mismatch
-  - Password 'WRONG_PASS' : Authentication failure (Permission denied)
+  - 192.168.10.250 : Drops connection during enable password
+  - Password 'WRONG_PASS' / user 'wrong_user' : Authentication failure
 """
 
 import re
@@ -20,7 +23,7 @@ class MockSession:
     def __init__(self):
         self.state = "BASTION"
         self.current_device = None
-        self.buffer = ""
+        self.input_buffer = ""
         self.output_queue = []
         self.device_state = {}
         self.pending_bastion_marker = False
@@ -37,16 +40,55 @@ class MockSession:
 
     def receive_input(self, text):
         """Process input sent from TTL macro (sendln / send)."""
+        # Control character: Ctrl+] (\x1d) -> Telnet escape prompt
+        if "\x1d" in text:
+            self.input_buffer = ""
+            if self.state == "DEVICE" and self.device_state.get("proto") == "telnet":
+                self.device_state["state"] = "TELNET_ESCAPE"
+                return "\r\ntelnet> "
+            return ""
+
+        # Control character: Ctrl+C (\x03)
         if "\x03" in text:
-            # Ctrl+C sent: abort current device connection and return to bastion
-            self.state = "BASTION"
-            self.pending_bastion_marker = False
+            self.input_buffer = ""
+            if self.state == "DEVICE":
+                proto = self.device_state.get("proto")
+                dstate = self.device_state.get("state")
+                if proto == "telnet":
+                    # Realistic Linux telnet: Ctrl+C does NOT exit telnet client!
+                    if dstate == "ENABLE_PASS":
+                        self.device_state["state"] = "READY"
+                        return "\r\n" + self._get_prompt(self.device_state)
+                    return "^C\r\n"
+                if dstate == "ENABLE_PASS":
+                    # Inside an authenticated SSH session, Ctrl+C cancels enable password prompt
+                    self.device_state["state"] = "READY"
+                    return "\r\n" + self._get_prompt(self.device_state)
+                # SSH client during auth: Ctrl+C aborts SSH back to bastion
+                self.state = "BASTION"
+                self.pending_bastion_marker = False
+                return "^C\r\n[bastion_user@bastion ~]$ "
             return "^C\r\n[bastion_user@bastion ~]$ "
 
-        if text.endswith("\n"):
-            lines = text[:-1].split("\n")
-        else:
-            lines = [text]
+        # Single space during paging (--More--) triggers immediately without newline
+        if (
+            self.state == "DEVICE"
+            and self.device_state.get("state") == "READY"
+            and self.device_state.get("paging")
+            and text == " "
+        ):
+            self.device_state["paging"] = False
+            prompt = self._get_prompt(self.device_state)
+            return f"\r\nAdditional output page 2\r\n{prompt}"
+
+        # Buffer characters until newline (supports split send + sendln commands)
+        self.input_buffer += text
+        if "\n" not in self.input_buffer:
+            return ""
+
+        parts = self.input_buffer.split("\n")
+        self.input_buffer = parts[-1]
+        lines = parts[:-1]
 
         response = ""
         for line in lines:
@@ -62,7 +104,9 @@ class MockSession:
             if not cmd:
                 return "\r\n[bastion_user@bastion ~]$ "
 
-            # Check forstandalone echo marker
+            # Standalone sync / return markers
+            if 'echo "__BAS""TION_SYNC__"' in cmd and not cmd.startswith(("ssh ", "telnet ")):
+                return "__BASTION_SYNC__\r\n[bastion_user@bastion ~]$ "
             if 'echo "__BAS""TION_RETURN__"' in cmd and not cmd.startswith(("ssh ", "telnet ")):
                 return "__BASTION_RETURN__\r\n[bastion_user@bastion ~]$ "
 
@@ -75,9 +119,15 @@ class MockSession:
             if cmd.startswith("ssh "):
                 tokens = cmd.split()[1:]
                 target = ""
+                num_pw_prompts = 3
                 i = 0
                 while i < len(tokens):
                     if tokens[i] == "-o":
+                        if i + 1 < len(tokens) and tokens[i + 1].startswith("NumberOfPasswordPrompts="):
+                            try:
+                                num_pw_prompts = int(tokens[i + 1].split("=", 1)[1])
+                            except ValueError:
+                                pass
                         i += 2
                         continue
                     if tokens[i].startswith("-"):
@@ -89,7 +139,7 @@ class MockSession:
                     user, ip = target.split("@", 1)
                 else:
                     user, ip = "bastion_user", target
-                return self._start_device_session(ip, user, "ssh")
+                return self._start_device_session(ip, user, "ssh", num_pw_prompts=num_pw_prompts)
 
             # Telnet command
             m_telnet = re.match(r"^telnet\s+(\S+)", cmd)
@@ -108,20 +158,34 @@ class MockSession:
         dtype = device.get("type")
         dstate = device.get("state")
 
+        # Telnet client escape prompt (after Ctrl+])
+        if dstate == "TELNET_ESCAPE":
+            if cmd in ("quit", "q", "close"):
+                self.state = "BASTION"
+                return "Connection closed.\r\n" + self._bastion_return_str()
+            return "telnet> "
+
         # Handling login prompts
         if dstate == "LOGIN_USER":
+            device["user"] = cmd
             if cmd in ("wrong_user", "bad_user"):
                 device["bad_user"] = True
+            else:
+                device["bad_user"] = False
             device["state"] = "LOGIN_PASS"
             return "Password: "
 
         if dstate == "LOGIN_PASS":
             if cmd.startswith("WRONG") or cmd.startswith("bad_") or device.get("bad_user"):
                 device["fail_count"] = device.get("fail_count", 0) + 1
-                if device["fail_count"] >= 3:
+                max_tries = device.get("num_pw_prompts", 3) if device.get("proto") == "ssh" else 3
+                if device.get("proto") == "ssh" and device["fail_count"] >= max_tries:
                     self.state = "BASTION"
                     return "\r\nPermission denied (publickey,password).\r\n" + self._bastion_return_str()
-                if device.get("type") in ("cisco", "cisco_drop_enable"):
+                if dtype == "cisco_telnet_only":
+                    device["state"] = "LOGIN_USER"
+                    return "\r\n% Authentication failed\r\n\r\nUsername: "
+                if dtype in ("cisco", "cisco_drop_enable"):
                     return "\r\n% Login invalid\r\n\r\nPassword: "
                 return "\r\nPermission denied, please try again.\r\nPassword: "
             return self._finish_login(device)
@@ -130,10 +194,12 @@ class MockSession:
             if dtype == "cisco_drop_enable":
                 self.state = "BASTION"
                 return "\r\nConnection to 192.168.10.250 closed by foreign host.\r\n" + self._bastion_return_str()
-            if dtype == "cisco":
+            if cmd.startswith("WRONG"):
+                return "\r\nPassword: "
+            if dtype in ("cisco", "cisco_telnet_only"):
                 device["mode"] = "privileged"
                 device["state"] = "READY"
-                return "\r\nRT-CISCO-01# "
+                return "\r\n" + self._get_prompt(device)
             elif dtype == "yamaha":
                 device["mode"] = "privileged"
                 device["state"] = "READY"
@@ -141,16 +207,17 @@ class MockSession:
 
         # Command handling in READY state
         if dstate == "READY":
+            prompt = self._get_prompt(device)
+
             # Paging check
             if device.get("paging"):
                 if cmd == " " or cmd == "":
                     device["paging"] = False
-                    prompt = self._get_prompt(device)
                     return f"\r\nAdditional output page 2\r\n{prompt}"
 
             # exit / quit / logout
             if cmd in ("exit", "quit", "logout"):
-                if device.get("mode") == "privileged" and dtype in ("cisco", "yamaha") and cmd == "exit":
+                if device.get("mode") == "privileged" and dtype in ("cisco", "cisco_telnet_only", "yamaha") and cmd == "exit":
                     # Drop back to unprivileged
                     device["mode"] = "user"
                     return "\r\n" + self._get_prompt(device)
@@ -161,13 +228,13 @@ class MockSession:
 
             # enable command
             if cmd == "enable":
-                if dtype in ("cisco", "cisco_drop_enable"):
+                if dtype in ("cisco", "cisco_telnet_only", "cisco_drop_enable"):
                     device["state"] = "ENABLE_PASS"
                     return "Password: "
                 elif dtype == "yamaha":
                     return "% Unknown command 'enable'\r\nYamaha> "
                 else:
-                    return f"{cmd}: command not found\r\n" + self._get_prompt(device)
+                    return f"{cmd}: command not found\r\n" + prompt
 
             # administrator command (Yamaha)
             if cmd == "administrator":
@@ -175,16 +242,27 @@ class MockSession:
                     device["state"] = "ENABLE_PASS"
                     return "Password: "
                 else:
-                    return f"{cmd}: command not found\r\n" + self._get_prompt(device)
+                    return f"{cmd}: command not found\r\n" + prompt
 
-            # pager disable commands
-            if cmd in ("terminal length 0", "set cli screen-length 0", "screen-length 0 temporary",
-                       "console lines infinity", "config paging disable"):
+            # Pager disable commands: simulate REALISTIC Cisco '% Invalid input detected' on non-Cisco cmds!
+            if cmd == "terminal length 0":
+                if dtype in ("cisco", "cisco_telnet_only", "telnet_switch"):
+                    device["paging_disabled"] = True
+                    return "\r\n" + prompt
+                return f"\r\n% Unknown command\r\n{prompt}"
+
+            if cmd in ("set cli screen-length 0", "screen-length 0 temporary", "console lines infinity"):
+                if dtype in ("cisco", "cisco_telnet_only"):
+                    return (
+                        f"\r\n{cmd}\r\n"
+                        "        ^\r\n"
+                        "% Invalid input detected at '^' marker.\r\n\r\n"
+                        + prompt
+                    )
                 device["paging_disabled"] = True
-                return "\r\n" + self._get_prompt(device)
+                return "\r\n" + prompt
 
             # Realistic outputs containing '#', '>', '$', ']' to verify prompt matching resilience
-            prompt = self._get_prompt(device)
             if cmd == "uname -a":
                 return (
                     "\r\nLinux srv-linux-01 5.15.0-91-generic #101-Ubuntu SMP "
@@ -210,7 +288,7 @@ class MockSession:
                     return "\r\nCisco IOS Software Version 15.2\r\n--More--"
                 return f"\r\nOutput for [{cmd}] on {dtype}\r\n{prompt}"
 
-            # empty line
+            # Empty Enter: echo CRLF + prompt (realistic terminal behavior for 2-Enter waitln!)
             if not cmd:
                 return "\r\n" + prompt
 
@@ -218,17 +296,22 @@ class MockSession:
 
         return ""
 
-    def _start_device_session(self, ip, user, proto):
-        # Simulated unreachable IP
+    def _start_device_session(self, ip, user, proto, num_pw_prompts=3):
+        # Simulated unreachable IP (both SSH and Telnet refused)
         if ip == "192.168.10.254":
             self.state = "BASTION"
+            if proto == "ssh":
+                return (
+                    f"\r\nssh: connect to host {ip} port 22: Connection refused\r\n"
+                    + self._bastion_return_str()
+                )
             return (
-                f"\r\nssh: connect to host {ip} port 22: Connection refused\r\n"
+                f"\r\ntelnet: Unable to connect to remote host: Connection refused\r\n"
                 + self._bastion_return_str()
             )
 
         # Simulated SSH legacy algorithm mismatch IP
-        if ip == "192.168.10.253":
+        if ip == "192.168.10.253" and proto == "ssh":
             self.state = "BASTION"
             return (
                 f"\r\nUnable to negotiate with {ip} port 22: no matching key exchange method found. "
@@ -236,10 +319,19 @@ class MockSession:
                 + self._bastion_return_str()
             )
 
+        # Simulated Telnet-only Cisco switch (SSH port 22 refused, Telnet port 23 works!)
+        if ip == "192.168.10.252" and proto == "ssh":
+            self.state = "BASTION"
+            return (
+                f"\r\nssh: connect to host {ip} port 22: Connection refused\r\n"
+                + self._bastion_return_str()
+            )
+
         self.state = "DEVICE"
-        # Determine device type by IP
         if ip == "192.168.10.250":
             dtype = "cisco_drop_enable"
+        elif ip == "192.168.10.252":
+            dtype = "cisco_telnet_only"
         elif ip == "192.168.10.1":
             dtype = "cisco"
         elif ip == "192.168.10.2":
@@ -263,10 +355,10 @@ class MockSession:
             "state": "LOGIN_PASS" if proto == "ssh" else "LOGIN_USER",
             "paging": False,
             "paging_disabled": False,
-            "fail_count": 0
+            "fail_count": 0,
+            "num_pw_prompts": num_pw_prompts,
         }
 
-        # Include realistic pre-login banner containing '#', '>', '$', ']'
         banner = (
             "\r\n#################################################\r\n"
             "# WARNING: Authorized Access Only [Node > $]    #\r\n"
@@ -274,14 +366,17 @@ class MockSession:
         )
         if proto == "ssh":
             return banner + "Password: "
-        else:
-            return banner + "login: "
+        if dtype == "cisco_telnet_only":
+            return banner + "\r\nUser Access Verification\r\n\r\nUsername: "
+        return banner + "login: "
 
     def _finish_login(self, device):
         device["state"] = "READY"
         dtype = device["type"]
         if dtype == "cisco":
             return "\r\nRT-CISCO-01> "
+        elif dtype == "cisco_telnet_only":
+            return "\r\nTELNET-CISCO> "
         elif dtype == "yamaha":
             return "\r\nYamaha> "
         elif dtype == "linux":
@@ -298,6 +393,8 @@ class MockSession:
         mode = device.get("mode")
         if dtype == "cisco":
             return "RT-CISCO-01# " if mode == "privileged" else "RT-CISCO-01> "
+        elif dtype == "cisco_telnet_only":
+            return "TELNET-CISCO# " if mode == "privileged" else "TELNET-CISCO> "
         elif dtype == "yamaha":
             return "Yamaha# " if mode == "privileged" else "Yamaha> "
         elif dtype == "linux":
