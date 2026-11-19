@@ -73,6 +73,9 @@ SSH_EXTRA_OPTS = '-o ConnectTimeout=10'
 DEF_CSV_NAME   = 'device.csv'             ; 読み込む機器一覧CSVファイル名
 DEF_LOG_NAME   = 'logs'                   ; ログを保存するフォルダ名
 DEF_CMD_NAME   = 'commands_universal.txt' ; CSV側でコマンド未指定時の汎用コマンドファイル
+DEF_CRED_NAME         = 'credentials.csv' ; 外部パスワード一覧CSVファイル名 (ユーザー名,PW,enPW)
+FALLBACK_TO_CRED_FILE = 0                 ; 0: device.csv 固有パスワード失敗時は次機器へ (安全)
+                                          ; 1: device.csv 固有パスワード失敗時も外部CSVの候補を追加試行
 
 ; --- タイムアウト設定 (単位: 秒) ---
 LOGIN_TIMEOUT  = 15                 ; 機器へのログイン応答を待つ最大秒数
@@ -103,6 +106,17 @@ DEF_LOG_PATH = inputstr
 sprintf '%s\%s' BASE_DIR DEF_CMD_NAME
 DEFAULT_CMD = inputstr
 
+sprintf '%s\%s' BASE_DIR DEF_CRED_NAME
+DEF_CRED_PATH = inputstr
+CRED_FILE = ''
+
+; デフォルトの外部パスワードCSV (credentials.csv) が存在するか確認
+fileopen f_chk DEF_CRED_PATH 0 1
+if f_chk <> -1 then
+    fileclose f_chk
+    CRED_FILE = DEF_CRED_PATH
+endif
+
 ; すでにTera Termウィンドウで踏み台サーバに接続済みかどうかを確認
 ; (result = 2 の場合は、手動で踏み台にログインした状態からマクロが実行されたと判断)
 ALREADY_CONNECTED = 0
@@ -122,6 +136,9 @@ if paramcnt >= 3 then
         CSV_FILE = param4
     else
         CSV_FILE = DEF_CSV_PATH
+    endif
+    if paramcnt >= 5 then
+        CRED_FILE = param5
     endif
 else
     ; ----------------------------------------------------
@@ -215,6 +232,37 @@ else
                 sprintf '%s\%s' BASE_DIR LOG_DIR
                 LOG_DIR = inputstr
             endif
+        endif
+    endif
+
+    ; ----------------------------------------------------
+    ; ポップアップ⑥: 外部パスワード一覧CSVファイル (省略可)
+    ; ----------------------------------------------------
+    inputbox '外部パスワードCSVファイル名（ユーザー名,パスワード,管理者PW）を入力してください:\n（使用しない場合は空欄のままOK）' '外部パスワードCSV選択（省略可）' CRED_FILE
+    CRED_FILE = inputstr
+
+    strlen CRED_FILE
+    if result > 0 then
+        ; 相対パスなら BASE_DIR を補完
+        strscan CRED_FILE '\'
+        if result = 0 then
+            strscan CRED_FILE '/'
+            if result = 0 then
+                strscan CRED_FILE ':'
+                if result = 0 then
+                    sprintf '%s\%s' BASE_DIR CRED_FILE
+                    CRED_FILE = inputstr
+                endif
+            endif
+        endif
+
+        fileopen f_chk CRED_FILE 0 1
+        if f_chk <> -1 then
+            fileclose f_chk
+        else
+            sprintf '指定された外部パスワードCSVが見つかりません:\n%s\n\nパスワードCSVを使用せずに処理を続行します。' CRED_FILE
+            messagebox inputstr 'パスワードCSV不存在'
+            CRED_FILE = ''
         endif
     endif
 endif
@@ -450,27 +498,36 @@ FINAL_PROMPT = '?'
 PROMPT_SYMBOL = '?'
 IS_LOG_OPEN = 0
 IS_DEVICE_LOGGED_IN = 0
+AUTH_ATTEMPT = 0
+F_CRED_OPEN = 0
+F_CRED_TRIED = 0
+ACTIVE_USER = ''
+ACTIVE_PASS = ''
+ACTIVE_ENPASS = ''
 
 ; ------------------------------------------------------
-; ★【認証情報キューの初期化】 (複数ユーザー名・パスワード候補対応)
-;   CSVの「ユーザー名」「パスワード」列から候補を展開し、順番に試行できるようにキューを作成します。
+; ★【認証情報の優先順位判定】
+;   1. device.csv に固有の認証情報（ユーザー名/パスワード）があれば最優先で試行
+;   2. device.csv が空欄、または1が失敗した場合は外部パスワードCSV (credentials.csv) を順次試行
+;   3. それでもログインできない場合は踏み台の認証情報でフォールバック試行
 ; ------------------------------------------------------
+HAS_DEV_CRED = 0
+strlen DEV_USER
+if result > 0 then
+    HAS_DEV_CRED = 1
+endif
+strlen DEV_PASS
+if result > 0 then
+    HAS_DEV_CRED = 1
+endif
+
+; インラインパイプ指定用のキュー初期化
 REMAIN_USERS = DEV_USER
 REMAIN_PASS  = DEV_PASS
 LAST_USER    = ''
 LAST_PASS    = ''
 
-; ユーザー名・パスワードが共に空なら、踏み台の認証情報をデフォルト候補1として登録
-strlen REMAIN_USERS
-U_INIT_LEN = result
-strlen REMAIN_PASS
-P_INIT_LEN = result
-if U_INIT_LEN = 0 and P_INIT_LEN = 0 then
-    REMAIN_USERS = BASTION_USER
-    REMAIN_PASS  = BASTION_PASS
-endif
-
-; マクロ設定エリアでグローバル候補が指定されている場合はキュー末尾に連結
+; グローバル候補プールが指定されていればキュー末尾に連結
 strlen GLOBAL_CRED_USERS
 if result > 0 then
     strlen REMAIN_USERS
@@ -481,7 +538,6 @@ if result > 0 then
         REMAIN_USERS = GLOBAL_CRED_USERS
     endif
 endif
-
 strlen GLOBAL_CRED_PASSES
 if result > 0 then
     strlen REMAIN_PASS
@@ -493,22 +549,38 @@ if result > 0 then
     endif
 endif
 
-AUTH_ATTEMPT = 0
+; device.csv に固有指定（またはパイプ指定）があればまずそれを試行
+if HAS_DEV_CRED = 1 then
+    goto try_inline_credential
+endif
+
+; device.csv が空欄で外部パスワードCSVが有効なら、直接外部CSVから試行開始
+strlen CRED_FILE
+if result > 0 then
+    goto open_cred_csv_file
+endif
+
+; 外部CSVもなければ踏み台認証情報フォールバック
+ACTIVE_USER = BASTION_USER
+ACTIVE_PASS = BASTION_PASS
+ACTIVE_ENPASS = BASTION_PASS
+AUTH_ATTEMPT = 1
+goto issue_connect_cmd
 
 
 ; ==============================================================================
-; 7. 対象機器への接続試行ループ (複数候補の順次トライ & 踏み台復帰マーカー)
+; 7. 対象機器への接続試行ループ
 ; ==============================================================================
-; 【重要設計】
-;   複数の認証情報（例: admin/Pass1 -> operator/Pass2 -> root/Pass3）が指定されている場合、
-;   1つ目が認証失敗しても踏み台セッションを維持したまま、次の候補で自動的に再接続します。
-;   コマンド末尾の `; echo "__BAS""TION_RETURN__"` により、踏み台への余分な exit を完全防止します。
-; ==============================================================================
-:try_next_credential
-; 認証情報キューから次の (ユーザー名, パスワード) 候補を取り出し
+
+; --- A) device.csv 側の指定（単一指定またはパイプ複数指定）から候補を取り出し ---
+:try_inline_credential
 call pop_next_credential
 if HAS_CRED = 0 then
-    ; すべての候補を試行して全滅した場合
+    ; インライン候補が尽きた場合、外部パスワードCSVがあれば外部ファイルへ移行
+    strlen CRED_FILE
+    if result > 0 and F_CRED_TRIED = 0 then
+        goto open_cred_csv_file
+    endif
     DEV_STATUS = 'NG'
     if AUTH_ATTEMPT > 1 then
         sprintf 'All %d Auth Attempts Failed' AUTH_ATTEMPT
@@ -520,8 +592,110 @@ endif
 AUTH_ATTEMPT = AUTH_ATTEMPT + 1
 ACTIVE_USER = CURR_USER
 ACTIVE_PASS = CURR_PASS
+ACTIVE_ENPASS = DEV_ENPASS
+strlen ACTIVE_ENPASS
+if result = 0 then
+    ACTIVE_ENPASS = ACTIVE_PASS
+endif
+goto issue_connect_cmd
 
-; 接続前に受信バッファの残存データを完全クリア
+
+; --- B) 外部パスワードCSVファイル (credentials.csv) から候補を取り出し ---
+:open_cred_csv_file
+F_CRED_TRIED = 1
+fileopen f_cred CRED_FILE 0 1
+if f_cred = -1 then
+    if AUTH_ATTEMPT > 0 then
+        DEV_STATUS = 'NG'
+        goto record_result
+    endif
+    ACTIVE_USER = BASTION_USER
+    ACTIVE_PASS = BASTION_PASS
+    ACTIVE_ENPASS = BASTION_PASS
+    AUTH_ATTEMPT = 1
+    goto issue_connect_cmd
+endif
+F_CRED_OPEN = 1
+
+:read_cred_csv_loop
+filereadln f_cred cred_line
+if result = 1 then
+    ; 外部パスワードCSVの末尾(EOF)到達（全候補失敗）
+    fileclose f_cred
+    F_CRED_OPEN = 0
+    DEV_STATUS = 'NG'
+    if AUTH_ATTEMPT > 1 then
+        sprintf 'All %d Auth Attempts Failed (Password CSV exhausted)' AUTH_ATTEMPT
+        DEV_DETAIL = inputstr
+    else
+        DEV_DETAIL = 'Auth Failed'
+    endif
+    goto record_result
+endif
+
+; 行トリム
+TRIM_VAL = cred_line
+call trim_string
+cred_line = TRIM_VAL
+
+strlen cred_line
+if result = 0 goto read_cred_csv_loop
+
+; コメント行スキップ (# または ;)
+strcopy cred_line 1 1 fc_cred
+strcompare fc_cred '#'
+if result = 0 goto read_cred_csv_loop
+strcompare fc_cred ';'
+if result = 0 goto read_cred_csv_loop
+
+; パスワードCSV行のパース (ユーザー名, パスワード, 管理者PW)
+PARSE_CRED_STR = cred_line
+call parse_cred_line
+
+; ヘッダ行スキップ
+strcompare C_USER 'ユーザー名'
+if result = 0 goto read_cred_csv_loop
+strcompare C_USER 'username'
+if result = 0 goto read_cred_csv_loop
+strcompare C_USER 'Username'
+if result = 0 goto read_cred_csv_loop
+
+; 空行スキップ
+strlen C_USER
+CU_LEN = result
+strlen C_PASS
+CP_LEN = result
+if CU_LEN = 0 and CP_LEN = 0 goto read_cred_csv_loop
+
+if CU_LEN = 0 then
+    C_USER = BASTION_USER
+endif
+if CP_LEN = 0 then
+    C_PASS = BASTION_PASS
+endif
+strlen C_ENPASS
+if result = 0 then
+    C_ENPASS = C_PASS
+endif
+
+; もし直前の device.csv 固有認証と全く同一なら二重試行をスキップ
+if HAS_DEV_CRED = 1 and AUTH_ATTEMPT = 1 then
+    strcompare C_USER DEV_USER
+    if result = 0 then
+        strcompare C_PASS DEV_PASS
+        if result = 0 goto read_cred_csv_loop
+    endif
+endif
+
+AUTH_ATTEMPT = AUTH_ATTEMPT + 1
+ACTIVE_USER = C_USER
+ACTIVE_PASS = C_PASS
+ACTIVE_ENPASS = C_ENPASS
+goto issue_connect_cmd
+
+
+; --- C) 接続コマンド発行 (SSH / Telnet + 踏み台復帰マーカー) ---
+:issue_connect_cmd
 flushrecv
 
 strcompare DEV_PROTO 'telnet'
@@ -710,19 +884,34 @@ endif
 
 ; ------------------------------------------------------
 ; ★【認証失敗時の次候補判定】
-;   認証失敗を検知した際、未試行のユーザー名・パスワード候補が残っていれば
-;   踏み台プロンプトから次の候補で再接続を試行します。
 ; ------------------------------------------------------
 :check_next_credential
+; 1) 外部パスワードCSVファイルがすでに開いている場合は、次の行を読む
+if F_CRED_OPEN = 1 then
+    mpause 300
+    flushrecv
+    goto read_cred_csv_loop
+endif
+
+; 2) インライン指定キューに残候補があれば次を取り出す
 strlen REMAIN_USERS
 REM_U_LEN = result
 strlen REMAIN_PASS
 REM_P_LEN = result
-
 if REM_U_LEN > 0 or REM_P_LEN > 0 then
     mpause 300
     flushrecv
-    goto try_next_credential
+    goto try_inline_credential
+endif
+
+; 3) インライン指定が尽き、外部パスワードCSVがあり、かつフォールバック許可時なら外部ファイルを開く
+strlen CRED_FILE
+if result > 0 and F_CRED_TRIED = 0 then
+    if HAS_DEV_CRED = 0 or FALLBACK_TO_CRED_FILE = 1 then
+        mpause 300
+        flushrecv
+        goto open_cred_csv_file
+    endif
 endif
 
 ; すべての認証候補が尽きた場合はNGとして結果記録へ
@@ -739,14 +928,27 @@ if LOGIN_SUCCESS = 0 then
     goto cleanup_device
 endif
 
+; 外部パスワードファイルが開いていれば即座にクローズ
+if F_CRED_OPEN = 1 then
+    fileclose f_cred
+    F_CRED_OPEN = 0
+endif
+
 ; 認証に成功したユーザー名・パスワードを変数に確定
 DEV_USER = ACTIVE_USER
 DEV_PASS = ACTIVE_PASS
 
-; 管理者(enable)パスワード未記載時は、認証成功した通常パスワードを流用
-strlen DEV_ENPASS
-if result = 0 then
-    DEV_ENPASS = ACTIVE_PASS
+; 管理者(enable)パスワードの設定
+; 外部パスワードCSV側で ACTIVE_ENPASS が指定されていればそれを優先
+strlen ACTIVE_ENPASS
+if result > 0 then
+    DEV_ENPASS = ACTIVE_ENPASS
+else
+    ; 未記載時は、認証成功した通常パスワードを流用
+    strlen DEV_ENPASS
+    if result = 0 then
+        DEV_ENPASS = ACTIVE_PASS
+    endif
 endif
 
 
@@ -1008,6 +1210,12 @@ if IS_DEVICE_LOGGED_IN = 1 then
 endif
 
 :cleanup_done
+; 外部パスワードファイルが開いていればクローズ
+if F_CRED_OPEN = 1 then
+    fileclose f_cred
+    F_CRED_OPEN = 0
+endif
+
 ; 次の機器の処理に影響しないよう、踏み台プロンプトの残存バッファをクリア
 mpause 200
 flushrecv
@@ -1023,6 +1231,12 @@ endif
 ; 14. サマリCSVへの追記
 ; ==============================================================================
 :record_result
+; 外部パスワードファイルが開いていればクローズ
+if F_CRED_OPEN = 1 then
+    fileclose f_cred
+    F_CRED_OPEN = 0
+endif
+
 strcompare DEV_STATUS 'OK'
 if result = 0 then
     OK_COUNT = OK_COUNT + 1
@@ -1047,6 +1261,10 @@ goto read_csv_loop
 ; 15. 全機器終了処理 & 完了サマリ通知
 ; ==============================================================================
 :end_csv_loop
+if F_CRED_OPEN = 1 then
+    fileclose f_cred
+    F_CRED_OPEN = 0
+endif
 fileclose f_csv
 
 ; マクロ側で新規に踏み台へ接続した場合のみログアウト（既存接続利用時は画面を残す）
@@ -1460,4 +1678,73 @@ return
     endif
 
     HAS_CRED = 1
+return
+
+
+; ==============================================================================
+; サブルーチン4: 外部パスワードCSV行パーサー (ユーザー名, パスワード, 管理者パスワード)
+; 入力: PARSE_CRED_STR
+; 出力: C_USER, C_PASS, C_ENPASS
+; ==============================================================================
+:parse_cred_line
+    C_USER = ''
+    C_PASS = ''
+    C_ENPASS = ''
+
+    ; 1列目 (ユーザー名) の切り出し
+    strscan PARSE_CRED_STR ','
+    if result = 0 then
+        C_USER = PARSE_CRED_STR
+        goto parse_cred_assign
+    endif
+    PC_POS = result
+    PC_CUT = PC_POS - 1
+    if PC_CUT > 0 then
+        strcopy PARSE_CRED_STR 1 PC_CUT C_USER
+    else
+        C_USER = ''
+    endif
+    strlen PARSE_CRED_STR
+    PC_REM = result - PC_POS
+    PC_START = PC_POS + 1
+    if PC_REM > 0 then
+        strcopy PARSE_CRED_STR PC_START PC_REM PARSE_CRED_STR
+    else
+        PARSE_CRED_STR = ''
+    endif
+
+    ; 2列目 (パスワード) と 3列目 (管理者パスワード) の切り出し
+    strscan PARSE_CRED_STR ','
+    if result = 0 then
+        C_PASS = PARSE_CRED_STR
+        goto parse_cred_assign
+    endif
+    PC_POS = result
+    PC_CUT = PC_POS - 1
+    if PC_CUT > 0 then
+        strcopy PARSE_CRED_STR 1 PC_CUT C_PASS
+    else
+        C_PASS = ''
+    endif
+    strlen PARSE_CRED_STR
+    PC_REM = result - PC_POS
+    PC_START = PC_POS + 1
+    if PC_REM > 0 then
+        strcopy PARSE_CRED_STR PC_START PC_REM C_ENPASS
+    else
+        C_ENPASS = ''
+    endif
+
+    :parse_cred_assign
+    TRIM_VAL = C_USER
+    call trim_string
+    C_USER = TRIM_VAL
+
+    TRIM_VAL = C_PASS
+    call trim_string
+    C_PASS = TRIM_VAL
+
+    TRIM_VAL = C_ENPASS
+    call trim_string
+    C_ENPASS = TRIM_VAL
 return

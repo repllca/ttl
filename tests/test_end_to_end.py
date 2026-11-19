@@ -263,6 +263,63 @@ class TestEndToEndSimulation(unittest.TestCase):
             if os.path.exists(temp_csv):
                 os.remove(temp_csv)
 
+    def test_external_password_csv_feature(self):
+        """
+        Verify that an external credentials CSV (user, password, enable_password) can be used
+        where target devices have blank credentials in device.csv. The macro should try each candidate
+        in credentials.csv in order, and cleanly succeed on the matching account.
+        """
+        import tempfile
+        logs_dir = os.path.join(WORKSPACE_DIR, "logs")
+        if os.path.exists(logs_dir):
+            import shutil
+            shutil.rmtree(logs_dir)
+
+        # 1. Create a custom external credentials CSV
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", dir=WORKSPACE_DIR, delete=False, encoding="utf-8") as tf_cred:
+            tf_cred.write(
+                "# ユーザー名,パスワード,管理者パスワード\n"
+                "wrong_user, WRONG_PASS ,\n"
+                "bad_user, bad_pass ,\n"
+                "admin, Pass1234 , EnablePass123\n"
+            )
+            temp_cred = tf_cred.name
+
+        # 2. Create device.csv with completely blank credentials
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", dir=WORKSPACE_DIR, delete=False, encoding="utf-8") as tf_dev:
+            tf_dev.write(
+                "# ホスト名,IPアドレス,ユーザー名,パスワード,管理者パスワード,プロトコル,コマンドファイル\n"
+                "AUTO-NODE-01, 192.168.10.1 , , , , ssh , commands_cisco.txt\n"
+            )
+            temp_dev = tf_dev.name
+
+        try:
+            session = MockSession()
+            engine = TTLEngine(
+                WORKSPACE_DIR,
+                session,
+                params=["device_runner.ttl", "logs", "mock_pass", temp_dev, temp_cred]
+            )
+            engine.load_script(TTL_FILE)
+            engine.run()
+
+            summary_files = glob.glob(os.path.join(logs_dir, "summary_*.csv"))
+            self.assertGreater(len(summary_files), 0)
+            with open(summary_files[-1], "r", encoding="utf-8") as f:
+                content = f.read()
+
+            lines = [l for l in content.splitlines() if l.strip() and not l.startswith("Timestamp")]
+            self.assertEqual(len(lines), 1)
+            parts = lines[0].split(",")
+            self.assertEqual(parts[1], "AUTO-NODE-01")
+            self.assertEqual(parts[5], "OK")
+            self.assertIn("Candidate #3", parts[6])
+        finally:
+            if os.path.exists(temp_cred):
+                os.remove(temp_cred)
+            if os.path.exists(temp_dev):
+                os.remove(temp_dev)
+
 
 if __name__ == "__main__":
     unittest.main()

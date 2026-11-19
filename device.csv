@@ -1,29 +1,29 @@
 # ホスト名,IPアドレス,ユーザー名,パスワード,管理者パスワード,プロトコル,コマンドファイル
 # ==============================================================================
-# 【ユーザー名・パスワードを複数候補試行する場合の記載方法】
+# 【認証情報の指定方法】
 #
-# パターン1: ユーザー名に対してパスワードを複数試す場合 (パイプ '|' 区切り)
-#   例: admin, 192.168.10.1, admin, OldPass|NewPass|Pass1234, ...
-#   -> OldPass を試行し、失敗したら NewPass、さらに失敗したら Pass1234 を順に試します。
+# 方法1: 外部パスワードCSV (credentials.csv) を使う場合【最も簡単・推奨】
+#   ユーザー名・パスワード・管理者PWを「すべて空欄」にしておくだけで、
+#   credentials.csv に記載された (ユーザー名, パスワード, 管理者PW) のリストを
+#   上から順に自動試行します。パイプ記号で区切る必要はありません。
 #
-# パターン2: ユーザー名とパスワードの両方をペアで複数試す場合
-#   例: admin|cisco, 192.168.10.1, admin|cisco, Pass1234|cisco123, ...
-#   -> (admin, Pass1234) で失敗時、(cisco, cisco123) を自動試行します。
+# 方法2: 機器固有のアカウント情報が決まっている場合
+#   CSVの該当列にユーザー名・パスワードを記載すれば、credentials.csv より優先して試行します。
 #
-# パターン3: ユーザー名列に user:pass 形式で1組ずつ記載する場合
-#   例: admin:Pass1234|operator:OpPass|root:RootPass (パスワード列は空欄)
+# 方法3: 機器ごとにパイプ(|)区切りでインライン候補を指定する場合
+#   例: ユーザー名: admin|cisco / パスワード: Pass1|Pass2
 # ==============================================================================
-# 1. ログイン前に機種が完全に不明な場合（プロトコル・管理者PW・コマンドファイル全て未指定で全自動適応）
-UNKNOWN-NODE-01,192.168.10.99,,,,,
-# 2. Cisco等 (管理者PW指定、専用コマンドファイル指定)
+# 1. 外部パスワードCSV (credentials.csv) を使って全自動ログインする機器（ユーザー・PW空欄）
+AUTO-NODE-01,192.168.10.1,,,,,commands_cisco.txt
+# 2. Cisco等 (個別パスワード指定、管理者PW指定)
 RT-CISCO-01,192.168.10.1,admin,Pass1234,EnablePass123,ssh,commands_cisco.txt
 # 3. Cisco等 (管理者PW未記載 -> 通常PW流用)
 SW-CISCO-02,192.168.10.2,admin,Pass1234,,ssh,commands_cisco.txt
 # 4. Linux等 (enable不要機器、コマンド指定)
 SRV-LINUX-01,192.168.10.3,user1,Pass1234,,,commands_linux.txt
-# 5. Juniper等 (踏み台クレデンシャル流用)
+# 5. Juniper等 (credentials.csv から自動認証)
 RT-JUNIPER-01,192.168.10.4,,,,ssh,commands_juniper.txt
 # 6. レガシーTelnet機器
 SW-LEGACY-01,192.168.10.5,admin,Pass1234,,telnet,commands_cisco.txt
-# 7. 複数認証情報の試行例 (1回目WRONG_PASS失敗 -> 2回目Pass1234で自動復帰・ログイン)
+# 7. インライン複数候補の指定例 (1回目WRONG_PASS失敗 -> 2回目Pass1234で自動復帰・ログイン)
 RT-MULTI-01,192.168.10.1,wrong_user|admin,WRONG_PASS|Pass1234,,ssh,commands_cisco.txt

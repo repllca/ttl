@@ -338,6 +338,28 @@ class TestCredentialQueueSubroutine(unittest.TestCase):
         self._call_subroutine("pop_next_credential")
         self.assertEqual(self.engine.vars["HAS_CRED"], 0)
 
+    def test_parse_cred_line_subroutine(self):
+        # 3 columns (user, pass, enpass)
+        self.engine.vars["PARSE_CRED_STR"] = " admin , Secret123 , EnableSecret999 "
+        self._call_subroutine("parse_cred_line")
+        self.assertEqual(self.engine.vars["C_USER"], "admin")
+        self.assertEqual(self.engine.vars["C_PASS"], "Secret123")
+        self.assertEqual(self.engine.vars["C_ENPASS"], "EnableSecret999")
+
+        # 2 columns (user, pass - enpass empty)
+        self.engine.vars["PARSE_CRED_STR"] = "operator,OpPass"
+        self._call_subroutine("parse_cred_line")
+        self.assertEqual(self.engine.vars["C_USER"], "operator")
+        self.assertEqual(self.engine.vars["C_PASS"], "OpPass")
+        self.assertEqual(self.engine.vars["C_ENPASS"], "")
+
+        # Quoted columns
+        self.engine.vars["PARSE_CRED_STR"] = '"root","RootPW!",""'
+        self._call_subroutine("parse_cred_line")
+        self.assertEqual(self.engine.vars["C_USER"], "root")
+        self.assertEqual(self.engine.vars["C_PASS"], "RootPW!")
+        self.assertEqual(self.engine.vars["C_ENPASS"], "")
+
 
 if __name__ == "__main__":
     unittest.main()
