@@ -506,6 +506,7 @@ AUTH_ATTEMPT = 0
 F_CRED_OPEN = 0
 F_CRED_TRIED = 0
 PROTO_DUAL_PHASE = 0
+SKIP_RETRY_WAIT = 0
 SSH_PORT_DEAD = 0
 TELNET_PORT_DEAD = 0
 ENABLE_FAILED = 0
@@ -843,14 +844,15 @@ goto issue_connect_cmd
 
 ; --- C) 接続コマンド発行 (SSH / Telnet + 踏み台復帰マーカー) ---
 :issue_connect_cmd
-; 2回目以降の試行時はウェイトを挿入（実機のブルートフォース防御・連続失敗ロック回避）
-if AUTH_ATTEMPT > 1 then
+; 2回目以降の試行時はウェイトを挿入（実機のブルートフォース防御回避。プロトコル切替時は即試行）
+if AUTH_ATTEMPT > 1 and SKIP_RETRY_WAIT = 0 then
     if AUTH_RETRY_INTERVAL > 0 then
         pause AUTH_RETRY_INTERVAL
     else
-        mpause 300
+        mpause 200
     endif
 endif
+SKIP_RETRY_WAIT = 0
 
 ; 認証試行履歴ログに現在の試行内容(ユーザー名・パスワード・プロトコル)を記録
 getdate TS '%Y/%m/%d %H:%M:%S'
@@ -990,9 +992,11 @@ if STAGE1_RES = 8 then
     SSH_PORT_DEAD = 1
     LAST_FAIL_DETAIL = 'SSH Algorithm Mismatch (Check SSH_EXTRA_OPTS)'
     if PROTO_DUAL_PHASE = 1 then
+        SKIP_RETRY_WAIT = 1
         goto check_next_credential
     endif
     if HAS_ORIG_PROTO = 0 and F_CRED_OPEN = 1 then
+        SKIP_RETRY_WAIT = 1
         goto check_next_credential
     endif
     DEV_STATUS = 'NG'
@@ -1012,12 +1016,13 @@ if STAGE1_RES = 9 then
     endif
     LAST_FAIL_DETAIL = 'Connection Refused / Unreachable'
     if HAS_ORIG_PROTO = 0 then
-        ; プロトコル未指定機器なら別プロトコル(例: SSH拒否 -> Telnet)を試行可能
+        ; プロトコル未指定機器なら別プロトコル(例: SSH拒否 -> Telnet)を待機なしで即試行
         if SSH_PORT_DEAD = 1 and TELNET_PORT_DEAD = 1 then
             DEV_STATUS = 'NG'
             DEV_DETAIL = 'Connection Refused (SSH & Telnet)'
             goto record_result
         endif
+        SKIP_RETRY_WAIT = 1
         goto check_next_credential
     endif
     DEV_STATUS = 'NG'
@@ -1898,13 +1903,16 @@ end
 ; サブルーチン0: 認証失敗・タイムアウト時の安全な踏み台復帰 (SSH / Telnet両対応)
 ; ==============================================================================
 :abort_to_bastion
-    ; 1) まずSSH/Telnetが自然に終了して踏み台へ戻ってくるのを短時間待機 (SSHはここで即復帰)
-    timeout = 1
-    wait '__BASTION_RETURN__'
-    if result = 1 then
-        mpause 200
-        flushrecv
-        return
+    ; 1) SSHは終了待ち1秒で即復帰。Telnetは自然終了しないことが多いため即座にCtrl+]へ進む
+    strcompare DEV_PROTO 'telnet'
+    if result <> 0 then
+        timeout = 1
+        wait '__BASTION_RETURN__'
+        if result = 1 then
+            mpause 100
+            flushrecv
+            return
+        endif
     endif
 
     ; 2) まだ接続が残っている場合、プロトコルに応じた安全な切断コマンドを送信
@@ -2478,8 +2486,26 @@ return
         C_PROTO = ''
     endif
 
-    ; 4列目の後ろに余分なカンマがあれば切り捨て
+    ; 4列目の後ろに余分なカンマ・コメントがあれば切り捨て
     strscan C_PROTO ','
+    if result > 0 then
+        PC_CUT = result - 1
+        if PC_CUT > 0 then
+            strcopy C_PROTO 1 PC_CUT C_PROTO
+        else
+            C_PROTO = ''
+        endif
+    endif
+    strscan C_PROTO '#'
+    if result > 0 then
+        PC_CUT = result - 1
+        if PC_CUT > 0 then
+            strcopy C_PROTO 1 PC_CUT C_PROTO
+        else
+            C_PROTO = ''
+        endif
+    endif
+    strscan C_PROTO ';'
     if result > 0 then
         PC_CUT = result - 1
         if PC_CUT > 0 then
