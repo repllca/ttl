@@ -383,7 +383,13 @@ class TTLEngine:
                     self.vars["result"] = 1  # EOF
                     self.vars[line_var] = ""
                 else:
-                    self.vars["result"] = 0
+                    # Accurately emulate real Tera Term filereadln:
+                    # If the last line has no trailing CR/LF, Tera Term reads the line
+                    # into <line_var> AND simultaneously sets result = 1 (EOF)!
+                    if not line.endswith("\n") and not line.endswith("\r"):
+                        self.vars["result"] = 1
+                    else:
+                        self.vars["result"] = 0
                     val = line.rstrip("\r\n")
                     # Simulate Tera Term 4.x raw-byte UTF-8 BOM (EF BB BF)
                     if val.startswith("\ufeff"):

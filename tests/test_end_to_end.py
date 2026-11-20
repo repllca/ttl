@@ -647,6 +647,90 @@ class TestEndToEndSimulation(unittest.TestCase):
             if os.path.exists(temp_dev):
                 os.remove(temp_dev)
 
+    def test_filereadln_eof_without_trailing_newline_all_files(self):
+        """
+        Regression test for Tera Term's filereadln EOF quirk:
+        When the last line of a file has NO trailing newline, Tera Term returns
+        the line text AND simultaneously sets result = 1 (EOF).
+        Verify that:
+        - The 4th (final, no-newline) 'ssh' line in credentials.csv IS read and matched
+          after 3 'telnet' lines are skipped.
+        - The final (no-newline) device in device.csv IS processed.
+        - The final (no-newline) command in the command file IS executed.
+        """
+        import tempfile
+        logs_dir = os.path.join(WORKSPACE_DIR, "logs")
+        if os.path.exists(logs_dir):
+            import shutil
+            shutil.rmtree(logs_dir)
+
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", dir=WORKSPACE_DIR, delete=False, encoding="utf-8") as tf_cmd:
+            # NO trailing newline on the 2nd (final) command!
+            tf_cmd.write("show version\nshow ip interface brief")
+            temp_cmd = tf_cmd.name
+
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", dir=WORKSPACE_DIR, delete=False, encoding="utf-8") as tf_cred:
+            # 3 telnet lines + 4th line ssh with NO trailing newline!
+            tf_cred.write(
+                "t1, tp1, , telnet\n"
+                "t2, tp2, , telnet\n"
+                "t3, tp3, , telnet\n"
+                "admin, Pass1234, EnablePass123, ssh"
+            )
+            temp_cred = tf_cred.name
+
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", dir=WORKSPACE_DIR, delete=False, encoding="utf-8") as tf_dev:
+            # Single SSH device with NO trailing newline!
+            tf_dev.write(
+                f"EOF-SSH-01,192.168.10.1,,,,ssh,{os.path.basename(temp_cmd)}"
+            )
+            temp_dev = tf_dev.name
+
+        try:
+            session = MockSession()
+            engine = TTLEngine(
+                WORKSPACE_DIR,
+                session,
+                params=["device_runner.ttl", "logs", "mock_pass", temp_dev, temp_cred]
+            )
+            engine.load_script(TTL_FILE)
+            engine.run()
+
+            summary_files = glob.glob(os.path.join(logs_dir, "summary_*.csv"))
+            self.assertGreater(len(summary_files), 0)
+            with open(summary_files[-1], "r", encoding="utf-8") as f:
+                content = f.read()
+
+            lines = [l for l in content.splitlines() if l.strip() and not l.startswith("Timestamp")]
+            self.assertEqual(len(lines), 1, f"Expected 1 device row, got: {lines}")
+            parts = lines[0].split(",")
+            self.assertEqual(parts[1], "EOF-SSH-01")
+            self.assertEqual(parts[3], "ssh")
+            self.assertEqual(parts[4], "#")
+            self.assertEqual(parts[5], "OK")
+            self.assertEqual(parts[7], "admin")
+
+            # Verify attempts_*.csv recorded 3 SKIP_PROTO (CSV=telnet Need=ssh) then TRYING/SUCCESS on line 4
+            attempt_files = glob.glob(os.path.join(logs_dir, "attempts_*.csv"))
+            self.assertGreater(len(attempt_files), 0)
+            with open(attempt_files[-1], "r", encoding="utf-8") as f:
+                att_content = f.read()
+            self.assertEqual(att_content.count("SKIP_PROTO (CSV=telnet Need=ssh)"), 3)
+            self.assertIn(",ssh,admin,Pass1234,TRYING", att_content)
+            self.assertIn(",ssh,admin,-,OK (Success)", att_content)
+
+            # Verify BOTH commands (including the last no-newline command) were executed in device log
+            dev_logs = [p for p in glob.glob(os.path.join(logs_dir, "EOF-SSH-01_*.log"))]
+            self.assertEqual(len(dev_logs), 1)
+            with open(dev_logs[0], "r", encoding="utf-8") as f:
+                dev_log = f.read()
+            self.assertIn("==================== [ show version ] ====================", dev_log)
+            self.assertIn("==================== [ show ip interface brief ] ====================", dev_log)
+        finally:
+            for p in (temp_cmd, temp_cred, temp_dev):
+                if os.path.exists(p):
+                    os.remove(p)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -49,8 +49,8 @@ BASTION_PROMPT = '$'                ; 踏み台サーバのシェルプロンプ
 ; --- 古い機器向けのSSH追加オプション ---
 ; 【変更のポイント】古いCiscoやスイッチ等で「no matching key exchange method found」等の
 ; エラーが出る場合は、下のコメントアウト(;)を外して有効化してください。
-SSH_EXTRA_OPTS = '-o ConnectTimeout=10'
-; SSH_EXTRA_OPTS = '-o ConnectTimeout=10 -o KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1 -o HostKeyAlgorithms=+ssh-rsa'
+SSH_EXTRA_OPTS = '-o ConnectTimeout=5'
+; SSH_EXTRA_OPTS = '-o ConnectTimeout=5 -o KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1 -o HostKeyAlgorithms=+ssh-rsa'
 
 ; --- デフォルトのファイル・フォルダ名 ---
 DEF_CSV_NAME          = 'device.csv'             ; 読み込む機器一覧CSVファイル名
@@ -63,13 +63,13 @@ FALLBACK_TO_BASTION_CRED = 0                     ; 0: 認証情報未指定時�
                                                  ; 1: 認証情報未指定時に踏み台ユーザー名/PWを自動流用する
 
 ; --- タイムアウト設定 (単位: 秒) ---
-LOGIN_TIMEOUT  = 15                 ; 機器へのログイン応答を待つ最大秒数
+LOGIN_TIMEOUT  = 8                  ; 機器へのログイン応答を待つ最大秒数
 CMD_TIMEOUT    = 30                 ; 各コマンドの実行結果を待つ最大秒数
 
 ; --- 試行・待機ウェイト設定 (単位: 秒) ---
 ; 【変更のポイント】実機の不正ログイン検知（ブルートフォース防御 / Quiet Mode / ロックアウト）
 ; やセッション枯渇を回避するため、認証失敗後の再試行間隔や、機器間の待機秒数を調整できます。
-AUTH_RETRY_INTERVAL = 2             ; 認証失敗後に次の候補を試行するまでの待機秒数 (推奨: 2〜3秒)
+AUTH_RETRY_INTERVAL = 1             ; 認証失敗後に次の候補を試行するまでの待機秒数 (推奨: 1〜2秒)
 DEVICE_INTERVAL     = 1             ; 1台の処理完了後、次の機器へ進むまでの待機秒数 (推奨: 1〜2秒)
 
 ; --- 全機器共通のフォールバック認証候補プール（オプション） ---
@@ -412,15 +412,22 @@ if f_csv = -1 then
     endif
     end
 endif
+CSV_EOF = 0
 
 :read_csv_loop
 ; 踏み台との通信セッションが継続しているかチェック (2 = 正常接続中)
 testlink
 if result <> 2 goto bastion_disconnected
 
-; 機器一覧CSVから1行読み込み
+; 機器一覧CSVから1行読み込み (最終行に改行が無い場合のEOF+データ同時返却に対応)
+if CSV_EOF = 1 goto end_csv_loop
+line = ''
 filereadln f_csv line
-if result = 1 goto end_csv_loop
+if result = 1 then
+    CSV_EOF = 1
+    strlen line
+    if result = 0 goto end_csv_loop
+endif
 
 ; 行の前後の空白・改行・BOMをトリム
 TRIM_VAL = line
@@ -664,6 +671,7 @@ goto issue_connect_cmd
 ; --- B) 外部パスワードCSVファイル (credentials.csv) から候補を取り出し ---
 :open_cred_csv_file
 F_CRED_TRIED = 1
+CRED_EOF = 0
 fileopen f_cred CRED_FILE 0 1
 if f_cred = -1 then
     if AUTH_ATTEMPT > 0 then
@@ -691,35 +699,15 @@ endif
 F_CRED_OPEN = 1
 
 :read_cred_csv_loop
+; Tera Term の filereadln は最終行に改行が無い場合、その行を返しつつ同時に result = 1 (EOF) になる。
+; そのため cred_line が空でない場合はその最終行を処理し、次回ループで EOF 終了する。
+if CRED_EOF = 1 goto cred_csv_eof
+cred_line = ''
 filereadln f_cred cred_line
 if result = 1 then
-    ; 外部パスワードCSVの末尾(EOF)到達（全候補失敗）
-    fileclose f_cred
-    F_CRED_OPEN = 0
-    DEV_STATUS = 'NG'
-    if AUTH_ATTEMPT > 1 then
-        sprintf 'All %d Auth Attempts Failed (Password CSV exhausted)' AUTH_ATTEMPT
-        DEV_DETAIL = inputstr
-    elseif AUTH_ATTEMPT = 1 then
-        strlen LAST_FAIL_DETAIL
-        if result > 0 then
-            DEV_DETAIL = LAST_FAIL_DETAIL
-        else
-            DEV_DETAIL = 'Auth Failed'
-        endif
-    else
-        ; 1件も試行できなかった場合 (プロトコル一致候補なし等)
-        strlen LAST_FAIL_DETAIL
-        if result > 0 then
-            DEV_DETAIL = LAST_FAIL_DETAIL
-        elseif HAS_ORIG_PROTO = 1 then
-            sprintf 'No Matching Credential in CSV (Need: %s)' ORIG_DEV_PROTO
-            DEV_DETAIL = inputstr
-        else
-            DEV_DETAIL = 'No Matching Credential in CSV'
-        endif
-    endif
-    goto record_result
+    CRED_EOF = 1
+    strlen cred_line
+    if result = 0 goto cred_csv_eof
 endif
 
 ; 行トリム
@@ -852,6 +840,35 @@ ACTIVE_USER = C_USER
 ACTIVE_PASS = C_PASS
 ACTIVE_ENPASS = C_ENPASS
 goto issue_connect_cmd
+
+:cred_csv_eof
+; 外部パスワードCSVの末尾(EOF)到達（全候補失敗）
+fileclose f_cred
+F_CRED_OPEN = 0
+DEV_STATUS = 'NG'
+if AUTH_ATTEMPT > 1 then
+    sprintf 'All %d Auth Attempts Failed (Password CSV exhausted)' AUTH_ATTEMPT
+    DEV_DETAIL = inputstr
+elseif AUTH_ATTEMPT = 1 then
+    strlen LAST_FAIL_DETAIL
+    if result > 0 then
+        DEV_DETAIL = LAST_FAIL_DETAIL
+    else
+        DEV_DETAIL = 'Auth Failed'
+    endif
+else
+    ; 1件も試行できなかった場合 (プロトコル一致候補なし等)
+    strlen LAST_FAIL_DETAIL
+    if result > 0 then
+        DEV_DETAIL = LAST_FAIL_DETAIL
+    elseif HAS_ORIG_PROTO = 1 then
+        sprintf 'No Matching Credential in CSV (Need: %s)' ORIG_DEV_PROTO
+        DEV_DETAIL = inputstr
+    else
+        DEV_DETAIL = 'No Matching Credential in CSV'
+    endif
+endif
+goto record_result
 
 
 ; --- C) 接続コマンド発行 (SSH / Telnet + 踏み台復帰マーカー) ---
@@ -1623,10 +1640,17 @@ if f_cmd = -1 then
     DEV_DETAIL = 'Command File Not Found'
     goto cleanup_device
 endif
+CMD_EOF = 0
 
 :read_cmd_loop
+if CMD_EOF = 1 goto end_cmd_loop
+cmd_line = ''
 filereadln f_cmd cmd_line
-if result = 1 goto end_cmd_loop
+if result = 1 then
+    CMD_EOF = 1
+    strlen cmd_line
+    if result = 0 goto end_cmd_loop
+endif
 
 ; コマンド行の前後空白・BOMをトリム
 TRIM_VAL = cmd_line
