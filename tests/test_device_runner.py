@@ -18,7 +18,8 @@ VALID_TTL_402_COMMANDS = {
     "strconcat", "strcopy", "strcompare", "strlen", "strscan", "sprintf", "getdate",
     "logopen", "logwrite", "logclose", "pause", "mpause", "timeout", "end", "goto",
     "if", "then", "else", "elseif", "endif",
-    "closett", "call", "return", "exec", "getdir", "setdir", "testlink"
+    "closett", "call", "return", "exec", "getdir", "setdir", "testlink",
+    "statusbox", "closesbox", "settitle"
 }
 
 class TestTTLSyntax(unittest.TestCase):
@@ -163,7 +164,7 @@ class TestTTLSyntax(unittest.TestCase):
                 else:
                     # Placeholder for path/sprintf variable (~50 bytes)
                     current_msg[var] = current_msg.get(var, "") + ("A" * 50)
-            m_box = re.match(r"^(messagebox|inputbox|passwordbox)\s+(DLG_MSG|ERROR_MSG)\b", code)
+            m_box = re.match(r"^(messagebox|inputbox|passwordbox|statusbox)\s+(DLG_MSG|ERROR_MSG)\b", code)
             if m_box:
                 var = m_box.group(2)
                 built = current_msg.get(var, "")

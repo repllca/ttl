@@ -327,6 +327,16 @@ class MockSession:
                 + self._bastion_return_str()
             )
 
+        # Simulated Telnet-not-accepted host (closes immediately on Telnet before login prompt)
+        if ip == "192.168.10.251" and proto == "telnet":
+            self.state = "BASTION"
+            return (
+                f"\r\nTrying {ip}...\r\n"
+                f"Connected to {ip}.\r\n"
+                f"Connection closed by foreign host.\r\n"
+                + self._bastion_return_str()
+            )
+
         self.state = "DEVICE"
         if ip == "192.168.10.250":
             dtype = "cisco_drop_enable"

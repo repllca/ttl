@@ -237,7 +237,7 @@ class TTLEngine:
             self.pc += 1
             return
 
-        if cmd == "messagebox":
+        if cmd in ("messagebox", "statusbox", "closesbox", "settitle"):
             self.pc += 1
             return
 

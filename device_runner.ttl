@@ -316,6 +316,15 @@ if f_res <> -1 then
     fileclose f_res
 endif
 
+; 認証試行履歴CSVの準備 (現在どのユーザー/パスワードを試しているか後から確認可能)
+sprintf '%s\attempts_%s.csv' LOG_DIR RUN_ID
+ATTEMPT_LOG_FILE = inputstr
+fileopen f_att ATTEMPT_LOG_FILE 0
+if f_att <> -1 then
+    filewriteln f_att 'Timestamp,Device,IP,Attempt,Protocol,User,Password,Result'
+    fileclose f_att
+endif
+
 
 ; ==============================================================================
 ; 5. 踏み台サーバへのSSH接続
@@ -843,6 +852,34 @@ if AUTH_ATTEMPT > 1 then
     endif
 endif
 
+; 認証試行履歴ログに現在の試行内容(ユーザー名・パスワード・プロトコル)を記録
+getdate TS '%Y/%m/%d %H:%M:%S'
+fileopen f_att ATTEMPT_LOG_FILE 1
+if f_att <> -1 then
+    sprintf '%s,%s,%s,#%d,%s,%s,%s,TRYING' TS DEV_NAME DEV_IP AUTH_ATTEMPT DEV_PROTO ACTIVE_USER ACTIVE_PASS
+    filewriteln f_att inputstr
+    fileclose f_att
+endif
+
+; 実行中のTera Term画面でも現在試行中のパスワード・ユーザー・プロトコルをリアルタイム表示
+if paramcnt < 3 then
+    sprintf '[#%d %s] %s (%s) %s' AUTH_ATTEMPT DEV_PROTO DEV_NAME DEV_IP ACTIVE_USER
+    settitle inputstr
+
+    sprintf '機器: %s (%s)' DEV_NAME DEV_IP
+    DLG_MSG = inputstr
+    strconcat DLG_MSG CRLF
+    sprintf 'プロトコル: %s / 試行: #%d' DEV_PROTO AUTH_ATTEMPT
+    strconcat DLG_MSG inputstr
+    strconcat DLG_MSG CRLF
+    sprintf 'ユーザー: %s' ACTIVE_USER
+    strconcat DLG_MSG inputstr
+    strconcat DLG_MSG CRLF
+    sprintf 'パスワード: %s' ACTIVE_PASS
+    strconcat DLG_MSG inputstr
+    statusbox DLG_MSG '接続・認証試行中'
+endif
+
 testlink
 if result <> 2 goto bastion_disconnected
 flushrecv
@@ -894,10 +931,21 @@ wait '__BASTION_RETURN__' 'yes/no' 'login:' 'Login:' 'Username:' 'User:' 'asswor
 STAGE1_RES = result
 
 if STAGE1_RES = 1 then
-    ; SSH/Telnetがパスワード画面前に終了して踏み台に戻った（公開鍵拒否・ユーザー拒否等）
-    ; ※別候補や別プロトコルが残っていれば次を試行する
+    ; SSH/Telnetがパスワード画面前に終了して踏み台に戻った
     mpause 200
     flushrecv
+    strcompare DEV_PROTO 'telnet'
+    if result = 0 then
+        ; Telnetは接続に認証情報を使わないため、ログイン画面前に閉じた場合はTelnet非対応と確定
+        TELNET_PORT_DEAD = 1
+        LAST_FAIL_DETAIL = 'Telnet Not Accepted / Closed by Host'
+        if HAS_ORIG_PROTO = 1 or SSH_PORT_DEAD = 1 then
+            DEV_STATUS = 'NG'
+            DEV_DETAIL = LAST_FAIL_DETAIL
+            goto record_result
+        endif
+        goto check_next_credential
+    endif
     LAST_FAIL_DETAIL = 'Connection Failed / Closed by Host'
     goto check_next_credential
 endif
@@ -997,6 +1045,19 @@ if STAGE1_RES = 0 then
     ; 1:__BASTION_RETURN__, 2:assword:, 3:login:, 4:Login:, 5:Username:, 6:invalid, 7:>, 8:#, 9:$, 10:]
     wait '__BASTION_RETURN__' 'assword:' 'login:' 'Login:' 'Username:' 'invalid' '>' '#' '$' ']'
     if result = 1 then
+        strcompare DEV_PROTO 'telnet'
+        if result = 0 then
+            if STAGE1_USER_SENT = 0 then
+                TELNET_PORT_DEAD = 1
+                LAST_FAIL_DETAIL = 'Telnet Not Accepted / Closed'
+                if HAS_ORIG_PROTO = 1 or SSH_PORT_DEAD = 1 then
+                    DEV_STATUS = 'NG'
+                    DEV_DETAIL = LAST_FAIL_DETAIL
+                    goto record_result
+                endif
+                goto check_next_credential
+            endif
+        endif
         LAST_FAIL_DETAIL = 'Connection Timed Out / Closed'
         goto check_next_credential
     endif
@@ -1044,6 +1105,20 @@ if STAGE1_RES = 0 then
 
     ; 応答なし -> 接続試行を安全に中断して踏み台へ復帰
     call abort_to_bastion
+    strcompare DEV_PROTO 'telnet'
+    if result = 0 then
+        if STAGE1_USER_SENT = 0 then
+            ; Telnetで一度もログイン画面が出ずにタイムアウト -> Telnet非対応と確定し以降のTelnet試行を停止
+            TELNET_PORT_DEAD = 1
+            LAST_FAIL_DETAIL = 'Telnet Not Accepted (Timeout)'
+            if HAS_ORIG_PROTO = 1 or SSH_PORT_DEAD = 1 then
+                DEV_STATUS = 'NG'
+                DEV_DETAIL = LAST_FAIL_DETAIL
+                goto record_result
+            endif
+            goto check_next_credential
+        endif
+    endif
     LAST_FAIL_DETAIL = 'Login Timeout'
     goto check_next_credential
 endif
@@ -1721,6 +1796,13 @@ if f_sum <> -1 then
     fileclose f_sum
 endif
 
+fileopen f_att ATTEMPT_LOG_FILE 1
+if f_att <> -1 then
+    sprintf '%s,%s,%s,#%d,%s,%s,-,%s (%s)' TS DEV_NAME DEV_IP AUTH_ATTEMPT DEV_PROTO DEV_USER DEV_STATUS DEV_DETAIL
+    filewriteln f_att inputstr
+    fileclose f_att
+endif
+
 ; 次の機器へ進む前にウェイトを挿入
 if DEVICE_INTERVAL > 0 then
     pause DEVICE_INTERVAL
@@ -1746,6 +1828,7 @@ if ALREADY_CONNECTED = 0 then
 endif
 
 if paramcnt < 3 then
+    closesbox
     if NG_COUNT = 0 then
         DLG_MSG = 'ログ収集完了 (全件成功)'
         strconcat DLG_MSG CRLF
@@ -1784,6 +1867,10 @@ if F_CRED_OPEN = 1 then
     F_CRED_OPEN = 0
 endif
 fileclose f_csv
+
+if paramcnt < 3 then
+    closesbox
+endif
 
 ERROR_MSG = '踏み台サーバとの接続が切断されました。'
 strconcat ERROR_MSG CRLF

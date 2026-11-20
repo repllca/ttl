@@ -580,6 +580,73 @@ class TestEndToEndSimulation(unittest.TestCase):
             if os.path.exists(temp_dev):
                 os.remove(temp_dev)
 
+    def test_telnet_not_accepted_stops_after_one_attempt_and_logs_attempts(self):
+        """
+        Verify:
+        - When Telnet is not accepted (192.168.10.251 closes before login prompt),
+          it stops after 1 attempt and does NOT retry the remaining 4 Telnet credentials.
+        - attempts_*.log records the exact user, password, and protocol tried.
+        """
+        import tempfile
+        logs_dir = os.path.join(WORKSPACE_DIR, "logs")
+        if os.path.exists(logs_dir):
+            import shutil
+            shutil.rmtree(logs_dir)
+
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", dir=WORKSPACE_DIR, delete=False, encoding="utf-8") as tf_cred:
+            tf_cred.write(
+                "# ユーザー名,パスワード,管理者パスワード,プロトコル\n"
+                "u1, p1 , , telnet\n"
+                "u2, p2 , , telnet\n"
+                "u3, p3 , , telnet\n"
+                "u4, p4 , , telnet\n"
+                "u5, p5 , , telnet\n"
+            )
+            temp_cred = tf_cred.name
+
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", dir=WORKSPACE_DIR, delete=False, encoding="utf-8") as tf_dev:
+            tf_dev.write(
+                "# ホスト名,IPアドレス,ユーザー名,パスワード,管理者パスワード,プロトコル,コマンドファイル\n"
+                "NO-TELNET-01, 192.168.10.251 , , , , telnet , commands_cisco.txt\n"
+            )
+            temp_dev = tf_dev.name
+
+        try:
+            session = MockSession()
+            engine = TTLEngine(
+                WORKSPACE_DIR,
+                session,
+                params=["device_runner.ttl", "logs", "mock_pass", temp_dev, temp_cred]
+            )
+            engine.load_script(TTL_FILE)
+            engine.run()
+
+            summary_files = glob.glob(os.path.join(logs_dir, "summary_*.csv"))
+            self.assertGreater(len(summary_files), 0)
+            with open(summary_files[-1], "r", encoding="utf-8") as f:
+                content = f.read()
+
+            lines = [l for l in content.splitlines() if l.strip() and not l.startswith("Timestamp")]
+            self.assertEqual(len(lines), 1)
+            parts = lines[0].split(",")
+            self.assertEqual(parts[1], "NO-TELNET-01")
+            self.assertEqual(parts[5], "NG")
+            self.assertIn("Telnet Not Accepted", parts[6])
+
+            # Confirm only 1 attempt was made (not 5!)
+            attempt_files = glob.glob(os.path.join(logs_dir, "attempts_*.csv"))
+            self.assertGreater(len(attempt_files), 0, "attempts_*.csv should be created")
+            with open(attempt_files[-1], "r", encoding="utf-8") as f:
+                att_lines = [l for l in f.read().splitlines() if l.strip() and not l.startswith("Timestamp")]
+            trying_lines = [l for l in att_lines if ",TRYING" in l]
+            self.assertEqual(len(trying_lines), 1, f"Expected exactly 1 Telnet attempt, got: {trying_lines}")
+            self.assertIn(",u1,p1,TRYING", trying_lines[0])
+        finally:
+            if os.path.exists(temp_cred):
+                os.remove(temp_cred)
+            if os.path.exists(temp_dev):
+                os.remove(temp_dev)
+
 
 if __name__ == "__main__":
     unittest.main()
