@@ -57,8 +57,10 @@ DEF_CSV_NAME          = 'device.csv'             ; 読み込む機器一覧CSV�
 DEF_LOG_NAME          = 'logs'                   ; ログを保存するフォルダ名
 DEF_CMD_NAME          = 'commands_universal.txt' ; CSV側でコマンド未指定時の汎用コマンドファイル
 DEF_CRED_NAME         = 'credentials.csv'        ; 外部パスワード一覧CSV (ユーザー名,PW,enPW,プロトコル)
-FALLBACK_TO_CRED_FILE = 0                        ; 0: device.csv 固有PW失敗時は次機器へ (安全)
+FALLBACK_TO_CRED_FILE    = 0                     ; 0: device.csv 固有PW失敗時は次機器へ (安全)
                                                  ; 1: device.csv 固有PW失敗時も外部CSVを追加試行
+FALLBACK_TO_BASTION_CRED = 0                     ; 0: 認証情報未指定時に踏み台ユーザー名を自動流用しない (推奨)
+                                                 ; 1: 認証情報未指定時に踏み台ユーザー名/PWを自動流用する
 
 ; --- タイムアウト設定 (単位: 秒) ---
 LOGIN_TIMEOUT  = 15                 ; 機器へのログイン応答を待つ最大秒数
@@ -557,19 +559,34 @@ if result > 0 then
     goto open_cred_csv_file
 endif
 
-; 3) 外部CSVもなければ踏み台認証情報で試行
-ACTIVE_USER = BASTION_USER
-ACTIVE_PASS = BASTION_PASS
-ACTIVE_ENPASS = BASTION_PASS
-AUTH_ATTEMPT = 1
-if HAS_ORIG_PROTO = 0 then
-    DEV_PROTO = 'ssh'
-    PROTO_DUAL_PHASE = 1
-else
-    DEV_PROTO = ORIG_DEV_PROTO
-    PROTO_DUAL_PHASE = 0
+; 3) 外部CSVも未設定で、グローバル候補プールがあれば試行
+strlen REMAIN_USERS
+R_ULEN = result
+strlen REMAIN_PASS
+R_PLEN = result
+if R_ULEN > 0 or R_PLEN > 0 then
+    goto try_inline_credential
 endif
-goto issue_connect_cmd
+
+; 4) いずれも無ければ、踏み台認証流用が許可されている場合のみ試行 (デフォルトはNG終了)
+if FALLBACK_TO_BASTION_CRED = 1 then
+    ACTIVE_USER = BASTION_USER
+    ACTIVE_PASS = BASTION_PASS
+    ACTIVE_ENPASS = BASTION_PASS
+    AUTH_ATTEMPT = 1
+    if HAS_ORIG_PROTO = 0 then
+        DEV_PROTO = 'ssh'
+        PROTO_DUAL_PHASE = 1
+    else
+        DEV_PROTO = ORIG_DEV_PROTO
+        PROTO_DUAL_PHASE = 0
+    endif
+    goto issue_connect_cmd
+endif
+
+DEV_STATUS = 'NG'
+DEV_DETAIL = 'No Credentials (credentials.csv missing)'
+goto record_result
 
 
 ; ==============================================================================
@@ -643,18 +660,23 @@ if f_cred = -1 then
         DEV_STATUS = 'NG'
         goto record_result
     endif
-    ACTIVE_USER = BASTION_USER
-    ACTIVE_PASS = BASTION_PASS
-    ACTIVE_ENPASS = BASTION_PASS
-    AUTH_ATTEMPT = 1
-    if HAS_ORIG_PROTO = 0 then
-        DEV_PROTO = 'ssh'
-        PROTO_DUAL_PHASE = 1
-    else
-        DEV_PROTO = ORIG_DEV_PROTO
-        PROTO_DUAL_PHASE = 0
+    if FALLBACK_TO_BASTION_CRED = 1 then
+        ACTIVE_USER = BASTION_USER
+        ACTIVE_PASS = BASTION_PASS
+        ACTIVE_ENPASS = BASTION_PASS
+        AUTH_ATTEMPT = 1
+        if HAS_ORIG_PROTO = 0 then
+            DEV_PROTO = 'ssh'
+            PROTO_DUAL_PHASE = 1
+        else
+            DEV_PROTO = ORIG_DEV_PROTO
+            PROTO_DUAL_PHASE = 0
+        endif
+        goto issue_connect_cmd
     endif
-    goto issue_connect_cmd
+    DEV_STATUS = 'NG'
+    DEV_DETAIL = 'Credentials CSV Open Failed'
+    goto record_result
 endif
 F_CRED_OPEN = 1
 
@@ -722,10 +744,18 @@ CP_LEN = result
 if CU_LEN = 0 and CP_LEN = 0 goto read_cred_csv_loop
 
 if CU_LEN = 0 then
-    C_USER = BASTION_USER
+    if FALLBACK_TO_BASTION_CRED = 1 then
+        C_USER = BASTION_USER
+    else
+        C_USER = ''
+    endif
 endif
 if CP_LEN = 0 then
-    C_PASS = BASTION_PASS
+    if FALLBACK_TO_BASTION_CRED = 1 then
+        C_PASS = BASTION_PASS
+    else
+        C_PASS = ''
+    endif
 endif
 strlen C_ENPASS
 if result = 0 then
@@ -858,23 +888,18 @@ STAGE1_USER_SENT = 0
 :login_stage1_loop
 timeout = LOGIN_TIMEOUT
 ; wait引数(10個厳守):
-; 1:__BASTION_RETURN__, 2:yes/no, 3:ogin:, 4:sername:, 5:ser:,
-; 6:assword:, 7:no matching, 8:Unable to negotiate, 9:refused, 10:unreachable
-wait '__BASTION_RETURN__' 'yes/no' 'ogin:' 'sername:' 'ser:' 'assword:' 'no matching' 'Unable to negotiate' 'refused' 'unreachable'
+; 1:__BASTION_RETURN__, 2:yes/no, 3:login:, 4:Login:, 5:Username:,
+; 6:User:, 7:assword:, 8:no matching, 9:refused, 10:unreachable
+wait '__BASTION_RETURN__' 'yes/no' 'login:' 'Login:' 'Username:' 'User:' 'assword:' 'no matching' 'refused' 'unreachable'
 STAGE1_RES = result
 
 if STAGE1_RES = 1 then
-    ; SSH/Telnetが即座に終了して踏み台に戻った（接続拒否・ホスト不在等）
+    ; SSH/Telnetがパスワード画面前に終了して踏み台に戻った（公開鍵拒否・ユーザー拒否等）
+    ; ※別候補や別プロトコルが残っていれば次を試行する
+    mpause 200
+    flushrecv
     LAST_FAIL_DETAIL = 'Connection Failed / Closed by Host'
-    if PROTO_DUAL_PHASE = 1 then
-        goto check_next_credential
-    endif
-    if HAS_ORIG_PROTO = 0 and F_CRED_OPEN = 1 then
-        goto check_next_credential
-    endif
-    DEV_STATUS = 'NG'
-    DEV_DETAIL = LAST_FAIL_DETAIL
-    goto record_result
+    goto check_next_credential
 endif
 
 if STAGE1_RES = 2 then
@@ -885,11 +910,13 @@ if STAGE1_RES = 2 then
     goto login_stage1_loop
 endif
 
-if STAGE1_RES >= 3 and STAGE1_RES <= 5 then
-    ; ユーザー名入力要求 (login: / Username: / User:)
+if STAGE1_RES >= 3 and STAGE1_RES <= 6 then
+    ; ユーザー名入力要求 (login: / Login: / Username: / User:)
     STAGE1_USER_SENT = STAGE1_USER_SENT + 1
     if STAGE1_USER_SENT >= 2 then
         ; 同一接続内で2回目のユーザー名再要求 -> 認証失敗として次候補へ
+        mpause 200
+        flushrecv
         call abort_to_bastion
         LAST_FAIL_DETAIL = 'Auth Failed (Username Rejected)'
         goto check_next_credential
@@ -900,7 +927,7 @@ if STAGE1_RES >= 3 and STAGE1_RES <= 5 then
     goto login_stage1_loop
 endif
 
-if STAGE1_RES = 6 then
+if STAGE1_RES = 7 then
     ; パスワード入力要求 (Password:) -> パスワードを送信して【第2段階】へ進む
     testlink
     if result <> 2 goto bastion_disconnected
@@ -908,7 +935,7 @@ if STAGE1_RES = 6 then
     goto login_stage2_wait
 endif
 
-if STAGE1_RES = 7 or STAGE1_RES = 8 then
+if STAGE1_RES = 8 then
     ; 古い機器でSSH鍵交換アルゴリズム等が不一致の場合
     timeout = 5
     wait '__BASTION_RETURN__'
@@ -960,14 +987,15 @@ if STAGE1_RES = 10 then
 endif
 
 if STAGE1_RES = 0 then
-    ; タイムアウト時: 公開鍵認証等でパスワードなしログイン済みか、Enter待ちかを確認
+    ; タイムアウト時: 古いバナーをクリアしてからEnterを1回送り、状態を確認
     testlink
     if result <> 2 goto bastion_disconnected
+    flushrecv
     sendln ''
     timeout = 5
     ; wait引数(10個厳守):
-    ; 1:__BASTION_RETURN__, 2:assword:, 3:ogin:, 4:sername:, 5:ser:, 6:invalid, 7:>, 8:#, 9:$, 10:]
-    wait '__BASTION_RETURN__' 'assword:' 'ogin:' 'sername:' 'ser:' 'invalid' '>' '#' '$' ']'
+    ; 1:__BASTION_RETURN__, 2:assword:, 3:login:, 4:Login:, 5:Username:, 6:invalid, 7:>, 8:#, 9:$, 10:]
+    wait '__BASTION_RETURN__' 'assword:' 'login:' 'Login:' 'Username:' 'invalid' '>' '#' '$' ']'
     if result = 1 then
         LAST_FAIL_DETAIL = 'Connection Timed Out / Closed'
         goto check_next_credential
@@ -986,11 +1014,15 @@ if STAGE1_RES = 0 then
             sendln ACTIVE_USER
             goto login_stage1_loop
         endif
+        mpause 200
+        flushrecv
         call abort_to_bastion
         LAST_FAIL_DETAIL = 'Auth Failed (Login Prompt)'
         goto check_next_credential
     endif
     if result = 6 then
+        mpause 200
+        flushrecv
         call abort_to_bastion
         LAST_FAIL_DETAIL = 'Auth Failed (Invalid)'
         goto check_next_credential
@@ -1018,7 +1050,7 @@ endif
 
 ; ------------------------------------------------------
 ; 【第2段階】パスワード送信後のプロンプト待機
-;   認証失敗キーワード (assword:, denied, invalid, failed, incorrect, sername:) を
+;   認証失敗キーワード (assword:, denied, invalid, failed, ogin:, sername:) を
 ;   プロンプト記号 (>, #, $) より優先判定します。
 ;   ※ '%' はCiscoエラーメッセージ先頭と被るため絶対に待機対象に含めません。
 ; ------------------------------------------------------
@@ -1026,8 +1058,8 @@ endif
 timeout = LOGIN_TIMEOUT
 ; wait引数(10個厳守):
 ; 1:__BASTION_RETURN__, 2:assword:, 3:denied, 4:invalid, 5:failed,
-; 6:incorrect, 7:sername:, 8:>, 9:#, 10:$
-wait '__BASTION_RETURN__' 'assword:' 'denied' 'invalid' 'failed' 'incorrect' 'sername:' '>' '#' '$'
+; 6:ogin:, 7:sername:, 8:>, 9:#, 10:$
+wait '__BASTION_RETURN__' 'assword:' 'denied' 'invalid' 'failed' 'ogin:' 'sername:' '>' '#' '$'
 
 if result = 1 then
     ; パスワード送信直後に切断されて踏み台へ戻った
@@ -1038,7 +1070,9 @@ if result = 1 then
 endif
 
 if result >= 2 and result <= 7 then
-    ; 認証失敗 (Password再要求、Permission denied、Login invalid、Auth failed、Username再要求等)
+    ; 認証失敗 (後続のUsername:/login:行が流れ切るのを待ってバッファを掃除してから切断)
+    mpause 300
+    flushrecv
     call abort_to_bastion
     LAST_FAIL_DETAIL = 'Auth Failed (Wrong Password)'
     goto check_next_credential
@@ -1062,9 +1096,10 @@ if result >= 8 and result <= 10 then
 endif
 
 if result = 0 then
-    ; パスワード送信後にタイムアウトした場合、Enterを1回送って再確認
+    ; パスワード送信後にタイムアウトした場合、古い文字を掃除してEnterを1回送り再確認
     testlink
     if result <> 2 goto bastion_disconnected
+    flushrecv
     sendln ''
     timeout = 5
     ; wait引数(10個厳守):
@@ -1077,6 +1112,8 @@ if result = 0 then
         goto check_next_credential
     endif
     if result >= 2 and result <= 7 then
+        mpause 300
+        flushrecv
         call abort_to_bastion
         LAST_FAIL_DETAIL = 'Auth Failed (Wrong Password)'
         goto check_next_credential
@@ -1296,43 +1333,73 @@ if INIT_PROMPT_IDX = 3 goto detect_final_prompt
 timeout = 3
 ; ※Ciscoエラー('% Invalid input...')に誤反応しないよう '%' は絶対に含めない
 
-; Cisco / Allied Telesis / Alaxala / Fortinet 用
+; 1) Cisco / Allied Telesis / Alaxala / Fortinet 用
 testlink
 if result <> 2 goto bastion_disconnected
 sendln 'terminal length 0'
-wait '__BASTION_RETURN__' '#' '>' '$' ']'
+wait '__BASTION_RETURN__' 'Invalid' 'Unknown' 'Error' 'syntax' '#' '>' '$' ']'
 if result = 1 then
     IS_DEVICE_LOGGED_IN = 0
     DEV_STATUS = 'NG'
     DEV_DETAIL = 'Disconnected During Paging Disable'
     goto cleanup_done
 endif
+if result >= 6 and result <= 9 goto detect_final_prompt
+if result >= 2 and result <= 5 then
+    wait '__BASTION_RETURN__' '#' '>' '$' ']'
+    if result = 1 then
+        IS_DEVICE_LOGGED_IN = 0
+        DEV_STATUS = 'NG'
+        DEV_DETAIL = 'Disconnected During Paging Disable'
+        goto cleanup_done
+    endif
+endif
 
-; Juniper JunOS 用
+; 2) Juniper JunOS 用
 testlink
 if result <> 2 goto bastion_disconnected
 sendln 'set cli screen-length 0'
-wait '__BASTION_RETURN__' '#' '>' '$' ']'
+wait '__BASTION_RETURN__' 'Invalid' 'Unknown' 'Error' 'syntax' '#' '>' '$' ']'
 if result = 1 then
     IS_DEVICE_LOGGED_IN = 0
     DEV_STATUS = 'NG'
     DEV_DETAIL = 'Disconnected During Paging Disable'
     goto cleanup_done
 endif
+if result >= 6 and result <= 9 goto detect_final_prompt
+if result >= 2 and result <= 5 then
+    wait '__BASTION_RETURN__' '#' '>' '$' ']'
+    if result = 1 then
+        IS_DEVICE_LOGGED_IN = 0
+        DEV_STATUS = 'NG'
+        DEV_DETAIL = 'Disconnected During Paging Disable'
+        goto cleanup_done
+    endif
+endif
 
-; Huawei VRP / H3C 用
+; 3) Huawei VRP / H3C 用
 testlink
 if result <> 2 goto bastion_disconnected
 sendln 'screen-length 0 temporary'
-wait '__BASTION_RETURN__' '#' '>' '$' ']'
+wait '__BASTION_RETURN__' 'Invalid' 'Unknown' 'Error' 'syntax' '#' '>' '$' ']'
 if result = 1 then
     IS_DEVICE_LOGGED_IN = 0
     DEV_STATUS = 'NG'
     DEV_DETAIL = 'Disconnected During Paging Disable'
     goto cleanup_done
 endif
+if result >= 6 and result <= 9 goto detect_final_prompt
+if result >= 2 and result <= 5 then
+    wait '__BASTION_RETURN__' '#' '>' '$' ']'
+    if result = 1 then
+        IS_DEVICE_LOGGED_IN = 0
+        DEV_STATUS = 'NG'
+        DEV_DETAIL = 'Disconnected During Paging Disable'
+        goto cleanup_done
+    endif
+endif
 
-; Yamaha RTX 用
+; 4) Yamaha RTX 用
 testlink
 if result <> 2 goto bastion_disconnected
 sendln 'console lines infinity'
@@ -1737,8 +1804,8 @@ end
 ; サブルーチン0: 認証失敗・タイムアウト時の安全な踏み台復帰 (SSH / Telnet両対応)
 ; ==============================================================================
 :abort_to_bastion
-    ; 1) まずSSH/Telnetが自然に終了して踏み台へ戻ってくるのを短時間待機
-    timeout = 2
+    ; 1) まずSSH/Telnetが自然に終了して踏み台へ戻ってくるのを短時間待機 (SSHはここで即復帰)
+    timeout = 1
     wait '__BASTION_RETURN__'
     if result = 1 then
         mpause 200
@@ -1749,13 +1816,33 @@ end
     ; 2) まだ接続が残っている場合、プロトコルに応じた安全な切断コマンドを送信
     strcompare DEV_PROTO 'telnet'
     if result = 0 then
-        ; Telnet は Ctrl+C では終了しないため、エスケープ文字 Ctrl+] (#29) + quit で確実に終了
+        ; Telnet: まず Ctrl+] (#29) を送り、'telnet>' プロンプトが出た場合のみ 'quit' を送信
+        ; (すでに終了していた場合に 'quit' をbashへ誤送信しないための安全策)
+        flushrecv
         send #29
+        timeout = 2
+        wait 'telnet>' '__BASTION_RETURN__'
+        if result = 1 then
+            testlink
+            if result <> 2 goto bastion_disconnected
+            sendln 'quit'
+            timeout = 3
+            wait '__BASTION_RETURN__'
+            if result = 1 then
+                mpause 200
+                flushrecv
+                return
+            endif
+        elseif result = 2 then
+            mpause 200
+            flushrecv
+            return
+        endif
+
+        ; 'telnet>' が出ない場合 (Trying... 中でハングしている場合等) は Ctrl+C (#3) で中断
+        send #3
         mpause 300
-        testlink
-        if result <> 2 goto bastion_disconnected
-        sendln 'quit'
-        timeout = 3
+        timeout = 2
         wait '__BASTION_RETURN__'
         if result = 1 then
             mpause 200
@@ -1780,7 +1867,7 @@ end
     if result <> 2 goto bastion_disconnected
     flushrecv
     sendln 'echo "__BAS""TION_SYNC__"'
-    timeout = 5
+    timeout = 3
     wait '__BASTION_SYNC__'
     mpause 200
     flushrecv
@@ -2193,8 +2280,10 @@ return
         strlen LAST_USER
         if result > 0 then
             CURR_USER = LAST_USER
-        else
+        elseif FALLBACK_TO_BASTION_CRED = 1 then
             CURR_USER = BASTION_USER
+        else
+            CURR_USER = ''
         endif
     else
         LAST_USER = CURR_USER
@@ -2205,8 +2294,10 @@ return
         strlen LAST_PASS
         if result > 0 then
             CURR_PASS = LAST_PASS
-        else
+        elseif FALLBACK_TO_BASTION_CRED = 1 then
             CURR_PASS = BASTION_PASS
+        else
+            CURR_PASS = ''
         endif
     else
         LAST_PASS = CURR_PASS
@@ -2334,6 +2425,21 @@ return
         return
     endif
     strcompare NORM_PROTO 'Ssh'
+    if result = 0 then
+        NORM_PROTO = 'ssh'
+        return
+    endif
+    strcompare NORM_PROTO 'sSh'
+    if result = 0 then
+        NORM_PROTO = 'ssh'
+        return
+    endif
+    strcompare NORM_PROTO 'ssh2'
+    if result = 0 then
+        NORM_PROTO = 'ssh'
+        return
+    endif
+    strcompare NORM_PROTO 'SSH2'
     if result = 0 then
         NORM_PROTO = 'ssh'
         return
