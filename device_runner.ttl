@@ -712,6 +712,9 @@ if result = 1 then
         strlen LAST_FAIL_DETAIL
         if result > 0 then
             DEV_DETAIL = LAST_FAIL_DETAIL
+        elseif HAS_ORIG_PROTO = 1 then
+            sprintf 'No Matching Credential in CSV (Need: %s)' ORIG_DEV_PROTO
+            DEV_DETAIL = inputstr
         else
             DEV_DETAIL = 'No Matching Credential in CSV'
         endif
@@ -786,7 +789,16 @@ if HAS_ORIG_PROTO = 1 then
     ; credentials.csv 側にプロトコル指定があり、かつ一致しない行はスキップ
     if CP_PROTO_LEN > 0 then
         strcompare C_PROTO ORIG_DEV_PROTO
-        if result <> 0 goto read_cred_csv_loop
+        if result <> 0 then
+            getdate TS '%Y/%m/%d %H:%M:%S'
+            fileopen f_att ATTEMPT_LOG_FILE 1
+            if f_att <> -1 then
+                sprintf '%s,%s,%s,-,%s,%s,-,SKIP_PROTO (CSV=%s Need=%s)' TS DEV_NAME DEV_IP C_PROTO C_USER C_PROTO ORIG_DEV_PROTO
+                filewriteln f_att inputstr
+                fileclose f_att
+            endif
+            goto read_cred_csv_loop
+        endif
     endif
     DEV_PROTO = ORIG_DEV_PROTO
     PROTO_DUAL_PHASE = 0
@@ -2568,63 +2580,33 @@ return
 ; 入力/出力: NORM_PROTO
 ; ==============================================================================
 :normalize_proto
-    strcompare NORM_PROTO 'SSH'
-    if result = 0 then
+    strscan NORM_PROTO 'ssh'
+    if result > 0 then
         NORM_PROTO = 'ssh'
         return
     endif
-    strcompare NORM_PROTO 'Ssh'
-    if result = 0 then
+    strscan NORM_PROTO 'SSH'
+    if result > 0 then
         NORM_PROTO = 'ssh'
         return
     endif
-    strcompare NORM_PROTO 'sSh'
-    if result = 0 then
+    strscan NORM_PROTO 'Ssh'
+    if result > 0 then
         NORM_PROTO = 'ssh'
         return
     endif
-    strcompare NORM_PROTO 'ssH'
-    if result = 0 then
-        NORM_PROTO = 'ssh'
-        return
-    endif
-    strcompare NORM_PROTO 'SSh'
-    if result = 0 then
-        NORM_PROTO = 'ssh'
-        return
-    endif
-    strcompare NORM_PROTO 'SsH'
-    if result = 0 then
-        NORM_PROTO = 'ssh'
-        return
-    endif
-    strcompare NORM_PROTO 'sSH'
-    if result = 0 then
-        NORM_PROTO = 'ssh'
-        return
-    endif
-    strcompare NORM_PROTO 'ssh2'
-    if result = 0 then
-        NORM_PROTO = 'ssh'
-        return
-    endif
-    strcompare NORM_PROTO 'SSH2'
-    if result = 0 then
-        NORM_PROTO = 'ssh'
-        return
-    endif
-    strcompare NORM_PROTO 'TELNET'
-    if result = 0 then
+    strscan NORM_PROTO 'telnet'
+    if result > 0 then
         NORM_PROTO = 'telnet'
         return
     endif
-    strcompare NORM_PROTO 'Telnet'
-    if result = 0 then
+    strscan NORM_PROTO 'TELNET'
+    if result > 0 then
         NORM_PROTO = 'telnet'
         return
     endif
-    strcompare NORM_PROTO 'TelNet'
-    if result = 0 then
+    strscan NORM_PROTO 'Telnet'
+    if result > 0 then
         NORM_PROTO = 'telnet'
         return
     endif
