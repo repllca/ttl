@@ -928,8 +928,8 @@ STAGE1_USER_SENT = 0
 timeout = LOGIN_TIMEOUT
 ; wait引数(10個厳守):
 ; 1:__BASTION_RETURN__, 2:yes/no, 3:login:, 4:Login:, 5:Username:,
-; 6:User:, 7:assword:, 8:no matching, 9:refused, 10:unreachable
-wait '__BASTION_RETURN__' 'yes/no' 'login:' 'Login:' 'Username:' 'User:' 'assword:' 'no matching' 'refused' 'unreachable'
+; 6:User:, 7:assword:, 8:PASSWORD:, 9:no matching, 10:refused
+wait '__BASTION_RETURN__' 'yes/no' 'login:' 'Login:' 'Username:' 'User:' 'assword:' 'PASSWORD:' 'no matching' 'refused'
 STAGE1_RES = result
 
 if STAGE1_RES = 1 then
@@ -947,6 +947,9 @@ if STAGE1_RES = 1 then
             goto record_result
         endif
         goto check_next_credential
+    endif
+    if PROTO_DUAL_PHASE = 1 then
+        SKIP_RETRY_WAIT = 1
     endif
     LAST_FAIL_DETAIL = 'Connection Failed / Closed by Host'
     goto check_next_credential
@@ -977,15 +980,15 @@ if STAGE1_RES >= 3 and STAGE1_RES <= 6 then
     goto login_stage1_loop
 endif
 
-if STAGE1_RES = 7 then
-    ; パスワード入力要求 (Password:) -> パスワードを送信して【第2段階】へ進む
+if STAGE1_RES = 7 or STAGE1_RES = 8 then
+    ; パスワード入力要求 (Password: / PASSWORD:) -> パスワードを送信して【第2段階】へ進む
     testlink
     if result <> 2 goto bastion_disconnected
     sendln ACTIVE_PASS
     goto login_stage2_wait
 endif
 
-if STAGE1_RES = 8 then
+if STAGE1_RES = 9 then
     ; 古い機器でSSH鍵交換アルゴリズム等が不一致の場合
     timeout = 5
     wait '__BASTION_RETURN__'
@@ -1004,7 +1007,7 @@ if STAGE1_RES = 8 then
     goto record_result
 endif
 
-if STAGE1_RES = 9 then
+if STAGE1_RES = 10 then
     ; Connection refused (対象ポートが閉じている)
     timeout = 5
     wait '__BASTION_RETURN__'
@@ -1030,20 +1033,10 @@ if STAGE1_RES = 9 then
     goto record_result
 endif
 
-if STAGE1_RES = 10 then
-    ; Network is unreachable (到達不能)
-    timeout = 5
-    wait '__BASTION_RETURN__'
-    DEV_STATUS = 'NG'
-    DEV_DETAIL = 'Connection Refused / Unreachable'
-    goto record_result
-endif
-
 if STAGE1_RES = 0 then
-    ; タイムアウト時: 古いバナーをクリアしてからEnterを1回送り、状態を確認
+    ; タイムアウト時: __BASTION_RETURN__を消さないようflushrecvせずEnterを1回送り確認
     testlink
     if result <> 2 goto bastion_disconnected
-    flushrecv
     sendln ''
     timeout = 5
     ; wait引数(10個厳守):
@@ -1138,8 +1131,8 @@ endif
 timeout = LOGIN_TIMEOUT
 ; wait引数(10個厳守):
 ; 1:__BASTION_RETURN__, 2:assword:, 3:Permission denied, 4:Login invalid,
-; 5:Authentication failed, 6:incorrect, 7:Username:, 8:>, 9:#, 10:$
-wait '__BASTION_RETURN__' 'assword:' 'Permission denied' 'Login invalid' 'Authentication failed' 'incorrect' 'Username:' '>' '#' '$'
+; 5:Authentication fail, 6:incorrect, 7:Username:, 8:>, 9:#, 10:$
+wait '__BASTION_RETURN__' 'assword:' 'Permission denied' 'Login invalid' 'Authentication fail' 'incorrect' 'Username:' '>' '#' '$'
 
 if result = 1 then
     ; パスワード送信直後に切断されて踏み台へ戻った
@@ -1179,23 +1172,22 @@ if result >= 8 and result <= 10 then
 endif
 
 if result = 0 then
-    ; パスワード送信後にタイムアウトした場合、古い文字を掃除してEnterを1回送り再確認
+    ; パスワード送信後にタイムアウトした場合、__BASTION_RETURN__を消さずにEnterを1回送り確認 (] も含む)
     testlink
     if result <> 2 goto bastion_disconnected
-    flushrecv
     sendln ''
     timeout = 5
     ; wait引数(10個厳守):
-    ; 1:__BASTION_RETURN__, 2:assword:, 3:Permission denied, 4:Login invalid,
-    ; 5:Authentication failed, 6:incorrect, 7:Username:, 8:>, 9:#, 10:$
-    wait '__BASTION_RETURN__' 'assword:' 'Permission denied' 'Login invalid' 'Authentication failed' 'incorrect' 'Username:' '>' '#' '$'
+    ; 1:__BASTION_RETURN__, 2:assword:, 3:Permission denied, 4:Access denied,
+    ; 5:incorrect, 6:Username:, 7:>, 8:#, 9:$, 10:]
+    wait '__BASTION_RETURN__' 'assword:' 'Permission denied' 'Access denied' 'incorrect' 'Username:' '>' '#' '$' ']'
     if result = 1 then
         mpause 200
         flushrecv
         LAST_FAIL_DETAIL = 'Auth Rejected / Closed by Host'
         goto check_next_credential
     endif
-    if result >= 2 and result <= 7 then
+    if result >= 2 and result <= 6 then
         strcompare DEV_PROTO 'telnet'
         if result = 0 then
             mpause 300
@@ -1205,14 +1197,16 @@ if result = 0 then
         LAST_FAIL_DETAIL = 'Auth Failed (Wrong Password)'
         goto check_next_credential
     endif
-    if result >= 8 and result <= 10 then
+    if result >= 7 and result <= 10 then
         LOGIN_SUCCESS = 1
-        if result = 8 then
+        if result = 7 then
             INIT_PROMPT_IDX = 1
-        elseif result = 9 then
+        elseif result = 8 then
             INIT_PROMPT_IDX = 2
-        else
+        elseif result = 9 then
             INIT_PROMPT_IDX = 3
+        else
+            INIT_PROMPT_IDX = 5
         endif
         IS_DEVICE_LOGGED_IN = 1
         goto login_success_exit
@@ -1233,6 +1227,7 @@ if PROTO_DUAL_PHASE = 1 then
     if TELNET_PORT_DEAD = 0 then
         DEV_PROTO = 'telnet'
         AUTH_ATTEMPT = AUTH_ATTEMPT + 1
+        SKIP_RETRY_WAIT = 1
         goto issue_connect_cmd
     endif
 endif
@@ -1952,13 +1947,28 @@ end
             return
         endif
     else
-        ; SSH は Ctrl+C (#3) で認証試行を中断
-        send #3
-        mpause 300
+        ; SSH: まず OpenSSH エスケープシーケンス (Enter + ~.) で安全切断を試み、ダメなら Ctrl+C (#3)
+        testlink
+        if result <> 2 goto bastion_disconnected
+        sendln ''
+        mpause 150
+        send '~.'
         timeout = 2
         wait '__BASTION_RETURN__'
         if result = 1 then
-            mpause 200
+            mpause 150
+            flushrecv
+            return
+        endif
+
+        testlink
+        if result <> 2 goto bastion_disconnected
+        send #3
+        mpause 300
+        timeout = 1
+        wait '__BASTION_RETURN__'
+        if result = 1 then
+            mpause 150
             flushrecv
             return
         endif
@@ -2151,6 +2161,25 @@ return
     call trim_string
     DEV_ENPASS = TRIM_VAL
 
+    ; COL6 (プロトコル) のインラインコメント除去 & トリム
+    strscan COL6 '#'
+    if result > 0 then
+        COPY_LEN = result - 1
+        if COPY_LEN > 0 then
+            strcopy COL6 1 COPY_LEN COL6
+        else
+            COL6 = ''
+        endif
+    endif
+    strscan COL6 ';'
+    if result > 0 then
+        COPY_LEN = result - 1
+        if COPY_LEN > 0 then
+            strcopy COL6 1 COPY_LEN COL6
+        else
+            COL6 = ''
+        endif
+    endif
     TRIM_VAL = COL6
     call trim_string
     DEV_PROTO = TRIM_VAL
@@ -2554,6 +2583,26 @@ return
         NORM_PROTO = 'ssh'
         return
     endif
+    strcompare NORM_PROTO 'ssH'
+    if result = 0 then
+        NORM_PROTO = 'ssh'
+        return
+    endif
+    strcompare NORM_PROTO 'SSh'
+    if result = 0 then
+        NORM_PROTO = 'ssh'
+        return
+    endif
+    strcompare NORM_PROTO 'SsH'
+    if result = 0 then
+        NORM_PROTO = 'ssh'
+        return
+    endif
+    strcompare NORM_PROTO 'sSH'
+    if result = 0 then
+        NORM_PROTO = 'ssh'
+        return
+    endif
     strcompare NORM_PROTO 'ssh2'
     if result = 0 then
         NORM_PROTO = 'ssh'
@@ -2570,6 +2619,11 @@ return
         return
     endif
     strcompare NORM_PROTO 'Telnet'
+    if result = 0 then
+        NORM_PROTO = 'telnet'
+        return
+    endif
+    strcompare NORM_PROTO 'TelNet'
     if result = 0 then
         NORM_PROTO = 'telnet'
         return
