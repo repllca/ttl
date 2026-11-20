@@ -1125,16 +1125,16 @@ endif
 
 ; ------------------------------------------------------
 ; 【第2段階】パスワード送信後のプロンプト待機
-;   認証失敗キーワード (assword:, denied, invalid, failed, ogin:, sername:) を
-;   プロンプト記号 (>, #, $) より優先判定します。
+;   ※ 'Last login:' や 'Last failed login:' 等のログイン成功直後メッセージに
+;      誤反応しないよう、具体的な認証失敗フレーズのみを判定します。
 ;   ※ '%' はCiscoエラーメッセージ先頭と被るため絶対に待機対象に含めません。
 ; ------------------------------------------------------
 :login_stage2_wait
 timeout = LOGIN_TIMEOUT
 ; wait引数(10個厳守):
-; 1:__BASTION_RETURN__, 2:assword:, 3:denied, 4:invalid, 5:failed,
-; 6:ogin:, 7:sername:, 8:>, 9:#, 10:$
-wait '__BASTION_RETURN__' 'assword:' 'denied' 'invalid' 'failed' 'ogin:' 'sername:' '>' '#' '$'
+; 1:__BASTION_RETURN__, 2:assword:, 3:Permission denied, 4:Login invalid,
+; 5:Authentication failed, 6:incorrect, 7:Username:, 8:>, 9:#, 10:$
+wait '__BASTION_RETURN__' 'assword:' 'Permission denied' 'Login invalid' 'Authentication failed' 'incorrect' 'Username:' '>' '#' '$'
 
 if result = 1 then
     ; パスワード送信直後に切断されて踏み台へ戻った
@@ -1145,9 +1145,12 @@ if result = 1 then
 endif
 
 if result >= 2 and result <= 7 then
-    ; 認証失敗 (後続のUsername:/login:行が流れ切るのを待ってバッファを掃除してから切断)
-    mpause 300
-    flushrecv
+    ; 認証失敗: Telnetの場合のみ後続プロンプトを掃除。SSHは__BASTION_RETURN__を消さないようそのまま復帰へ
+    strcompare DEV_PROTO 'telnet'
+    if result = 0 then
+        mpause 300
+        flushrecv
+    endif
     call abort_to_bastion
     LAST_FAIL_DETAIL = 'Auth Failed (Wrong Password)'
     goto check_next_credential
@@ -1178,8 +1181,9 @@ if result = 0 then
     sendln ''
     timeout = 5
     ; wait引数(10個厳守):
-    ; 1:__BASTION_RETURN__, 2:assword:, 3:denied, 4:invalid, 5:failed, 6:ogin:, 7:sername:, 8:>, 9:#, 10:$
-    wait '__BASTION_RETURN__' 'assword:' 'denied' 'invalid' 'failed' 'ogin:' 'sername:' '>' '#' '$'
+    ; 1:__BASTION_RETURN__, 2:assword:, 3:Permission denied, 4:Login invalid,
+    ; 5:Authentication failed, 6:incorrect, 7:Username:, 8:>, 9:#, 10:$
+    wait '__BASTION_RETURN__' 'assword:' 'Permission denied' 'Login invalid' 'Authentication failed' 'incorrect' 'Username:' '>' '#' '$'
     if result = 1 then
         mpause 200
         flushrecv
@@ -1187,8 +1191,11 @@ if result = 0 then
         goto check_next_credential
     endif
     if result >= 2 and result <= 7 then
-        mpause 300
-        flushrecv
+        strcompare DEV_PROTO 'telnet'
+        if result = 0 then
+            mpause 300
+            flushrecv
+        endif
         call abort_to_bastion
         LAST_FAIL_DETAIL = 'Auth Failed (Wrong Password)'
         goto check_next_credential

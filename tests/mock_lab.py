@@ -390,7 +390,11 @@ class MockSession:
         elif dtype == "yamaha":
             return "\r\nYamaha> "
         elif dtype == "linux":
-            return "\r\nuser@linux:~$ "
+            return (
+                "\r\nLast failed login: Fri Nov 20 11:00:00 JST 2026 from 192.168.1.1 on ssh:notty\r\n"
+                "Last login: Fri Nov 20 10:55:00 JST 2026 from 192.168.1.1\r\n"
+                "user@linux:~$ "
+            )
         elif dtype == "juniper":
             return "\r\nuser@juniper> "
         elif dtype == "telnet_switch":
