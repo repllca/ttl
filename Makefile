@@ -1,4 +1,4 @@
-.PHONY: all test check build
+.PHONY: all test check build clean
 
 all: check test
 
@@ -13,3 +13,7 @@ check:
 build:
 	@echo "Verifying device files and command lists..."
 	@ls -la *.ttl *.csv *.txt
+
+clean:
+	@echo "Cleaning generated logs and caches..."
+	rm -rf logs tests/__pycache__ __pycache__

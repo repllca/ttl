@@ -1,4 +1,5 @@
 .devbox/
 __pycache__/
+*.pyc
 *.log
 logs/

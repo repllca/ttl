@@ -439,8 +439,8 @@ class TestCredentialQueueSubroutine(unittest.TestCase):
         self.assertIn("DEVICE_INTERVAL", content)
         self.assertIn("CRLF = #13#10", content)
 
-        # Ensure no raw \n exists in string literals or sprintf in any .ttl file
-        for filename in ("device_runner.ttl", "test.ttl"):
+        # Ensure no raw \n exists in string literals or sprintf in any active .ttl file
+        for filename in ("device_runner.ttl", os.path.join("archive", "test.ttl")):
             path = os.path.join(WORKSPACE_DIR, filename)
             if os.path.exists(path):
                 with open(path, "r", encoding="utf-8") as f:

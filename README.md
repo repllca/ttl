@@ -1,29 +1,31 @@
 # ネットワーク機器・サーバ 参照系ログ自動収集マクロ (Tera Term 4.x互換)
 
-踏み台サーバ経由で複数のネットワーク機器（Cisco / Juniper / Yamaha / Huawei / Linux 等）へ順次SSH/Telnet接続し、安全に参照系コマンド（showコマンド等）の実行とログ収集を自動化するTera Termマクロ（TTL）です。
+踏み台サーバ経由で複数のネットワーク機器（Cisco / Juniper / Yamaha / Huawei / Linux 等）へ順次 SSH / Telnet 接続し、参照系コマンド（`show` コマンド等）の実行とログ収集を自動化する Tera Term マクロ（TTL）です。
+
+---
 
 ## 主な特徴
 
-- **Tera Term 4.02 / 4.0x 完全互換保証**:
-  - 古いTera Termバージョン（4.02など）でエラーの原因となる新設コマンド（Ver 4.67追加の `strsplit`、Ver 4.53追加の `break`、Ver 4.77追加の `continue`、`sprintf2` 等）を**完全に排除**。
-  - すべてのループをラベル（`:label`）と `goto` で構成し、CSV分解は Ver 4.0x で動作する `strscan` と `strcopy` の組み合わせで実装しています。
-  - すべての `wait` コマンドで引数の個数をTera Term仕様上限の **10個以内** に厳守。
-- **ログイン前 機器種別不明への完全自動適応**:
-  - ログイン前の時点で機器の種類が分かっていなくても、認証ループによりユーザ名要求（`login:`, `Username:`, `User:` 等）、パスワード要求（`Password:`, `パスワード:`）、SSH初回鍵確認（`yes/no`）、バナー（Enter/any key）を自動検知してログインを突破します。
-  - コマンドファイル列が空欄の場合は、全ベンダーの基本情報取得コマンドを安全に網羅した `commands_universal.txt` を自動適用します。
-- **特権昇格 (enable) の自動判別 & Yamahaフォールバック**:
-  - ログイン時のプロンプト記号（`#`, `$`, `%`, `]`）から特権モードやLinux/Juniperを自動判別し、不要な `enable` 試行を回避します。
-  - 一般モード（`>`）の場合のみ `enable` を試行し、`enable` が無効（Yamahaルータ等）の場合は `administrator` コマンドへ自動フォールバックします。
-  - それでも昇格できない場合でも、エラー中断せず通常モードのままコマンドを実行します。
-- **ページ送り抑止の総当たり & 自動ページング解消 (`--More--` 対策)**:
-  - 主要ベンダー向けページング解除コマンド（`terminal length 0`, `set cli screen-length 0`, `console lines infinity` 等）を自動送信します。
-  - 万が一途中で `--More--` や `-- 続く --` 等が発生した場合も、マクロが自動検知してスペースキーを送信し、自動で最後までページ送りします。
-- **欠損値・省略値への柔軟なフォールバック**:
-  - `device.csv` 内のプロトコル（未指定時は `ssh`）、ユーザー名・パスワード（未指定時は踏み台情報を流用）、管理者パスワード（未指定時は通常パスワードを流用）の欠損に自動対応します。
-- **ログ保存先ディレクトリ指定 & 自動フォルダ作成**:
-  - 起動時に保存先フォルダ（`logs` 等）を指定可能。存在しないディレクトリの場合は自動作成します。
-- **実行結果サマリCSV（`summary_YYYYMMDD_HHMMSS.csv`）自動出力**:
-  - 機器ごとの個別ログ（`ホスト名_日時.log`）に加えて、全機器の最終プロンプト、実行成否ステータス（`OK`/`NG`）、エラー詳細をまとめたCSVを自動生成します。
+- **Tera Term 4.0x / 4.x 実機完全互換**:
+  - Ver 4.53+ の新設コマンド（`strsplit`, `break`, `continue`, `sprintf2`, `tolower` 等）を排除。
+  - `wait` / `waitln` の引数上限（10個）、ダイアログ文字列 255 バイト上限、`CRLF = #13#10`、実機特有の `and` / `or` 演算子優先順位（全条件括弧囲み）、`filereadln` の最終行（末尾改行なし）EOF 仕様まで完全対応。
+- **外部パスワード一覧（`credentials.csv`）による自動総当たり認証**:
+  - `device.csv` のユーザー名・パスワード列が空欄の機器に対して、`credentials.csv` の候補を上から順に自動試行します。
+  - 試行中のユーザー名・パスワード・プロトコルは画面タイトルと `statusbox` にリアルタイム表示されます。
+  - `FALLBACK_TO_BASTION_CRED = 0`（デフォルト）により、意図せず踏み台のユーザー名が対象機器へ流用されるのを防止します。
+- **SSH / Telnet の自動判別・高速フォールバック**:
+  - `device.csv` のプロトコル列が空欄の場合は **SSH → 失敗時は自動で Telnet** を試行します。
+  - SSH には `-o PubkeyAuthentication=no -o PreferredAuthentications=keyboard-interactive,password` を自動付与し、秘密鍵・GSSAPI 遅延によるタイムアウトや切断を防止します。
+  - 古い機器で SSH の鍵交換・暗号アルゴリズム不一致（`no matching` / `no mutual`）が発生した場合は、自動で旧アルゴリズム互換オプションを付けて即リトライします。
+  - Telnet がポート拒否・ログイン画面前切断・タイムアウトで受け付けていない場合は、**1回目で即打ち切り**して無駄な待機を省きます。
+- **マルチベンダー自動適応（特権昇格・ページング解除）**:
+  - 一般モード（`>`）のみ `enable` を試行し、非対応機器（Yamaha 等）では `administrator` へ自動フォールバックします。
+  - ベンダー別ページング無効化コマンドを順次送信し、途中の `--More--` / `続く` 等も自動でスペース送りします。
+- **充実したログ・診断出力**:
+  - `logs/<ホスト名>_YYYYMMDD_HHMMSS.log`: 機器ごとのコマンド実行生ログ
+  - `logs/summary_YYYYMMDD_HHMMSS.csv`: 全機器の成否（`OK`/`NG`）・プロンプト・詳細・ログインユーザー一覧
+  - `logs/resolved_accounts_YYYYMMDD_HHMMSS.csv`: ログイン成功したアカウント・プロトコルの一覧
+  - `logs/attempts_YYYYMMDD_HHMMSS.csv`: 各試行のユーザー・パスワード・プロトコル・`SKIP_PROTO` / `FAIL (原因)` 履歴
 
 ---
 
@@ -31,70 +33,71 @@
 
 ```text
 .
-├── device_runner.ttl        # メインマクロ（4.02完全互換・マルチベンダー完全自動適応）
+├── device_runner.ttl        # メインマクロ本体（Tera Term 4.x 互換）
 ├── device.csv               # 接続対象機器リスト
+├── credentials.csv          # 共通パスワード一覧（自動試行用）
 ├── commands_universal.txt   # 機種不明時用 汎用コマンド一覧
-├── commands_cisco.txt       # Cisco向けコマンド一覧
-├── commands_juniper.txt     # Juniper向けコマンド一覧
-├── commands_linux.txt       # Linux向けコマンド一覧
-├── Makefile                 # 自動テスト・検証環境実行用
-├── tests/
-│   ├── test_device_runner.py# 単体テスト & 4.02互換性静的解析
-│   ├── test_end_to_end.py   # E2E検証テスト
-│   ├── mock_lab.py          # 踏み台・マルチベンダー模擬環境
-│   └── ttl_engine.py        # TTLマクロエミュレーションエンジン
-└── README.md                # 本ドキュメント
+├── commands_cisco.txt       # Cisco 向けコマンド一覧
+├── commands_juniper.txt     # Juniper 向けコマンド一覧
+├── commands_linux.txt       # Linux 向けコマンド一覧
+├── Makefile                 # 自動テスト・構文チェック・掃除コマンド
+├── README.md                # 本ドキュメント
+├── tests/                   # 静的解析・実機互換エミュレータ・E2Eテスト一式
+│   ├── test_device_runner.py
+│   ├── test_end_to_end.py
+│   ├── mock_lab.py
+│   └── ttl_engine.py
+└── archive/                 # 旧プロトタイプ・参考用ファイル保管場所
 ```
 
 ---
 
-## 各設定ファイルの書き方
+## 設定ファイルの書き方（推奨パターン）
 
-### `device.csv`（機器リスト）
+### 1. `credentials.csv`（共通パスワード一覧）
+先頭行には `#` を付け、**4列目（プロトコル）は空欄にしておくと SSH / Telnet 両方に自動マッチする**ため最も確実です。
 
-カンマ区切りで各機器の情報を記載します。先頭が `#` の行やヘッダ行は自動スキップされます。
+```csv
+# ユーザー名,パスワード,管理者パスワード,プロトコル
+admin,Pass1234,EnablePass123,
+cisco,cisco,cisco,
+user1,Pass1234,,
+operator,Pass1234,,telnet
+```
+
+### 2. `device.csv`（機器リスト）
+基本は **7列（カンマ6個）** で記載します。`credentials.csv` を使う場合は 3〜5 列目を空欄（`,,,,`）にします。
 
 ```csv
 # ホスト名,IPアドレス,ユーザー名,パスワード,管理者パスワード,プロトコル,コマンドファイル
-# 1. ログイン前に機種が完全に不明な場合（全て未指定で全自動適応）
-UNKNOWN-NODE-01,192.168.10.99,,,,,
-# 2. Cisco等 (管理者PW指定、専用コマンドファイル指定)
-RT-CISCO-01,192.168.10.1,admin,Pass1234,EnablePass123,ssh,commands_cisco.txt
-# 3. Cisco等 (管理者PW未記載 -> 通常PW流用)
-SW-CISCO-02,192.168.10.2,admin,Pass1234,,ssh,commands_cisco.txt
-# 4. Linux等 (enable不要機器)
-SRV-LINUX-01,192.168.10.3,user1,Pass1234,,,commands_linux.txt
-# 5. Juniper等 (踏み台クレデンシャル流用)
+# 1. credentials.csv 自動ログイン（プロトコル空欄 = SSH → Telnet 自動試行）
+AUTO-NODE-01,192.168.10.1,,,,,commands_cisco.txt
+# 2. credentials.csv 自動ログイン（SSH 指定）
 RT-JUNIPER-01,192.168.10.4,,,,ssh,commands_juniper.txt
-# 6. レガシーTelnet機器
+# 3. 機器固有の認証情報を直接指定
+RT-CISCO-01,192.168.10.1,admin,Pass1234,EnablePass123,ssh,commands_cisco.txt
+# 4. Telnet 機器
 SW-LEGACY-01,192.168.10.5,admin,Pass1234,,telnet,commands_cisco.txt
 ```
 
-#### 省略時の自動補完動作
-- **コマンドファイル**: 空欄の場合、自動的に `commands_universal.txt` を適用。
-- **プロトコル**: 空欄の場合、自動的に `ssh` を適用。
-- **管理者パスワード**: 空欄の場合、ログインパスワードを流用。
-- **ユーザー名・パスワード**: 空欄の場合、踏み台サーバのユーザー名・パスワードを流用。
-- **ホスト名**: 空欄の場合、IPアドレスをログファイル名等に利用。
+※ `ホスト名,IPアドレス,ssh,commands_cisco.txt` のような 4 列短縮形式も自動補正して動作します。
+※ 文字コードは **UTF-8（BOMなし）または ASCII**、先頭ヘッダには `#` を付けて保存してください。
 
 ---
 
 ## 実行手順
 
-1. `device_runner.ttl` の冒頭にある踏み台サーバ情報（`BASTION_HOST`、`BASTION_USER` 等）を確認・編集します。
-2. Tera Term を起動し、メニューの **[コントロール] > [マクロ]** から `device_runner.ttl` を選択します。
-3. **ログ保存先ディレクトリの指定ダイアログ**が表示されます（デフォルトは `logs`。任意のフルパスや相対パスを指定可能。存在しない場合は自動作成されます）。
-4. 踏み台サーバのパスワード入力ダイアログが表示されるので入力して実行します。
-5. 処理完了後、指定したディレクトリ内に機器ごとの生ログファイル（`ホスト名_YYYYMMDD_HHMMSS.log`）およびサマリ一覧（`summary_YYYYMMDD_HHMMSS.csv`）が出力されます。
+1. `device.csv` と `credentials.csv`（必要に応じて `commands_*.txt`）を編集します。
+2. Tera Term を起動し、**[コントロール] > [マクロ]** から `device_runner.ttl` を選択します（踏み台に接続済みの状態で起動するとそのまま踏み台セッションを流用します）。
+3. ポップアップ画面で対象 CSV・パスワード CSV・ログ保存先フォルダを確認し、踏み台サーバの接続情報（未接続時）を入力します。
+4. 完了後、指定フォルダ（デフォルト `logs/`）に機器別ログと各種サマリ CSV が出力されます。
 
 ---
 
-## テストの実行
-
-プロジェクト内の整合性チェックおよび全自動適応ロジックの単体テストを実行できます：
+## テスト・メンテナンスコマンド
 
 ```bash
-make test
-# または
-make check
+make check   # Tera Term 4.x 互換性・構文・演算子優先順位チェック
+make test    # 全単体テスト & E2E 模擬環境テスト実行
+make clean   # 生成された logs/ や __pycache__/ を削除
 ```
