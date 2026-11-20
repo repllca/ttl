@@ -559,32 +559,132 @@ class TTLEngine:
             self.pc += 1
 
     def _eval_condition(self, cond_str):
-        # Support expressions with: and, or, =, <>, >=, <=, >, <
-        # Replace variable names with values
-        def repl(match):
-            token = match.group(0)
-            if token.lower() in ("and", "or", "not"):
-                return token.lower()
-            if token in self.vars:
-                val = self.vars[token]
+        """
+        Accurately evaluate a Tera Term 4.x TTL conditional expression using REAL
+        Tera Term operator precedence (NOT Python's logical precedence!):
+          1 (highest): parentheses ( ... )
+          2: unary not (~)
+          5: bitwise and
+          7: bitwise or
+          8: relational <, >, <=, >= (left-associative, returns 1 or 0)
+          9 (lowest): equality =, <> (left-associative, returns 1 or 0)
+        This ensures unparenthesized 'A = 0 and B = 0' fails just like real Tera Term!
+        """
+        token_re = re.compile(
+            r"\s*("
+            r"<>|<=|>=|[=<>()]|"
+            r"'[^']*'|\"[^\"]*\"|"
+            r"-?\d+|"
+            r"[a-zA-Z_][a-zA-Z0-9_]*"
+            r")"
+        )
+        tokens = []
+        pos = 0
+        s = cond_str.strip()
+        while pos < len(s):
+            m = token_re.match(s, pos)
+            if not m:
+                return False
+            tokens.append(m.group(1))
+            pos = m.end()
+
+        idx = 0
+
+        def peek():
+            return tokens[idx] if idx < len(tokens) else None
+
+        def consume():
+            nonlocal idx
+            tok = tokens[idx]
+            idx += 1
+            return tok
+
+        def to_int(val):
+            if isinstance(val, int):
+                return val
+            if isinstance(val, str):
+                try:
+                    return int(val)
+                except ValueError:
+                    return 0
+            return int(bool(val))
+
+        def parse_eq():
+            left = parse_rel()
+            while peek() in ("=", "<>"):
+                op = consume()
+                right = parse_rel()
+                if op == "=":
+                    left = 1 if left == right else 0
+                else:
+                    left = 1 if left != right else 0
+            return left
+
+        def parse_rel():
+            left = parse_or()
+            while peek() in ("<", ">", "<=", ">="):
+                op = consume()
+                right = parse_or()
+                lv, rv = to_int(left), to_int(right)
+                if op == "<":
+                    left = 1 if lv < rv else 0
+                elif op == ">":
+                    left = 1 if lv > rv else 0
+                elif op == "<=":
+                    left = 1 if lv <= rv else 0
+                else:
+                    left = 1 if lv >= rv else 0
+            return left
+
+        def parse_or():
+            left = parse_and()
+            while peek() is not None and peek().lower() == "or":
+                consume()
+                right = parse_and()
+                left = to_int(left) | to_int(right)
+            return left
+
+        def parse_and():
+            left = parse_unary()
+            while peek() is not None and peek().lower() == "and":
+                consume()
+                right = parse_unary()
+                left = to_int(left) & to_int(right)
+            return left
+
+        def parse_unary():
+            if peek() is not None and peek().lower() == "not":
+                consume()
+                return ~to_int(parse_unary())
+            return parse_primary()
+
+        def parse_primary():
+            tok = peek()
+            if tok == "(":
+                consume()
+                val = parse_eq()
+                if peek() == ")":
+                    consume()
+                return val
+            consume()
+            if tok is None:
+                return 0
+            if (tok.startswith("'") and tok.endswith("'")) or (tok.startswith('"') and tok.endswith('"')):
+                return tok[1:-1]
+            if tok.lstrip("-").isdigit():
+                return int(tok)
+            if tok in self.vars:
+                val = self.vars[tok]
                 if isinstance(val, int):
-                    return str(val)
+                    return val
                 if isinstance(val, str) and (val.isdigit() or (val.startswith("-") and val[1:].isdigit())):
-                    return str(int(val))
-                if isinstance(val, str):
-                    return f"'{val}'"
-                return str(val)
-            return token
+                    return int(val)
+                return val
+            return 0
 
-        # Replace <> with !=, = with ==
-        expr = cond_str
-        expr = re.sub(r"<>", "!=", expr)
-        expr = re.sub(r"(?<![<>!=])=(?!=)", "==", expr)
-
-        # Substitute variables
-        expr = re.sub(r"[a-zA-Z_][a-zA-Z0-9_]*", repl, expr)
         try:
-            return bool(eval(expr, {}, {}))
+            res = parse_eq()
+            return to_int(res) != 0
         except Exception:
             return False
 

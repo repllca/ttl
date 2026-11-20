@@ -120,14 +120,19 @@ class MockSession:
                 tokens = cmd.split()[1:]
                 target = ""
                 num_pw_prompts = 3
+                has_legacy_kex = False
                 i = 0
                 while i < len(tokens):
                     if tokens[i] == "-o":
-                        if i + 1 < len(tokens) and tokens[i + 1].startswith("NumberOfPasswordPrompts="):
-                            try:
-                                num_pw_prompts = int(tokens[i + 1].split("=", 1)[1])
-                            except ValueError:
-                                pass
+                        if i + 1 < len(tokens):
+                            opt_val = tokens[i + 1]
+                            if opt_val.startswith("NumberOfPasswordPrompts="):
+                                try:
+                                    num_pw_prompts = int(opt_val.split("=", 1)[1])
+                                except ValueError:
+                                    pass
+                            elif opt_val.startswith("KexAlgorithms=") and "diffie-hellman-group1-sha1" in opt_val:
+                                has_legacy_kex = True
                         i += 2
                         continue
                     if tokens[i].startswith("-"):
@@ -139,7 +144,9 @@ class MockSession:
                     user, ip = target.split("@", 1)
                 else:
                     user, ip = "bastion_user", target
-                return self._start_device_session(ip, user, "ssh", num_pw_prompts=num_pw_prompts)
+                return self._start_device_session(
+                    ip, user, "ssh", num_pw_prompts=num_pw_prompts, has_legacy_kex=has_legacy_kex
+                )
 
             # Telnet command
             m_telnet = re.match(r"^telnet\s+(\S+)", cmd)
@@ -296,7 +303,7 @@ class MockSession:
 
         return ""
 
-    def _start_device_session(self, ip, user, proto, num_pw_prompts=3):
+    def _start_device_session(self, ip, user, proto, num_pw_prompts=3, has_legacy_kex=False):
         # Simulated unreachable IP (both SSH and Telnet refused)
         if ip == "192.168.10.254":
             self.state = "BASTION"
@@ -310,8 +317,17 @@ class MockSession:
                 + self._bastion_return_str()
             )
 
-        # Simulated SSH legacy algorithm mismatch IP
+        # Simulated SSH legacy algorithm mismatch IP (always rejects)
         if ip == "192.168.10.253" and proto == "ssh":
+            self.state = "BASTION"
+            return (
+                f"\r\nUnable to negotiate with {ip} port 22: no matching key exchange method found. "
+                f"Their offer: diffie-hellman-group1-sha1\r\n"
+                + self._bastion_return_str()
+            )
+
+        # Simulated legacy Cisco switch: rejects modern SSH, SUCCEEDS when legacy KexAlgorithms is sent!
+        if ip == "192.168.10.249" and proto == "ssh" and not has_legacy_kex:
             self.state = "BASTION"
             return (
                 f"\r\nUnable to negotiate with {ip} port 22: no matching key exchange method found. "
@@ -342,6 +358,8 @@ class MockSession:
             dtype = "cisco_drop_enable"
         elif ip == "192.168.10.252":
             dtype = "cisco_telnet_only"
+        elif ip == "192.168.10.249":
+            dtype = "cisco"
         elif ip == "192.168.10.1":
             dtype = "cisco"
         elif ip == "192.168.10.2":

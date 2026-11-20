@@ -63,7 +63,7 @@ FALLBACK_TO_BASTION_CRED = 0                     ; 0: 認証情報未指定時�
                                                  ; 1: 認証情報未指定時に踏み台ユーザー名/PWを自動流用する
 
 ; --- タイムアウト設定 (単位: 秒) ---
-LOGIN_TIMEOUT  = 8                  ; 機器へのログイン応答を待つ最大秒数
+LOGIN_TIMEOUT  = 12                 ; 機器へのログイン応答を待つ最大秒数 (SSH接続の鍵交換遅延にも対応)
 CMD_TIMEOUT    = 30                 ; 各コマンドの実行結果を待つ最大秒数
 
 ; --- 試行・待機ウェイト設定 (単位: 秒) ---
@@ -450,9 +450,19 @@ call parse_csv_line
 ; ヘッダ行スキップ
 strcompare DEV_NAME 'ホスト名'
 if result = 0 goto read_csv_loop
+strcompare DEV_NAME 'ホスト'
+if result = 0 goto read_csv_loop
+strcompare DEV_NAME '機器名'
+if result = 0 goto read_csv_loop
 strcompare DEV_NAME 'hostname'
 if result = 0 goto read_csv_loop
 strcompare DEV_NAME 'Hostname'
+if result = 0 goto read_csv_loop
+strcompare DEV_NAME 'HOSTNAME'
+if result = 0 goto read_csv_loop
+strcompare DEV_NAME 'host'
+if result = 0 goto read_csv_loop
+strcompare DEV_NAME 'Host'
 if result = 0 goto read_csv_loop
 
 ; IPアドレスが空欄の行はスキップ
@@ -516,6 +526,7 @@ PROTO_DUAL_PHASE = 0
 SKIP_RETRY_WAIT = 0
 SSH_PORT_DEAD = 0
 TELNET_PORT_DEAD = 0
+SSH_LEGACY_MODE = 0
 ENABLE_FAILED = 0
 ACTIVE_USER = ''
 ACTIVE_PASS = ''
@@ -581,7 +592,7 @@ strlen REMAIN_USERS
 R_ULEN = result
 strlen REMAIN_PASS
 R_PLEN = result
-if R_ULEN > 0 or R_PLEN > 0 then
+if (R_ULEN > 0) or (R_PLEN > 0) then
     goto try_inline_credential
 endif
 
@@ -616,8 +627,8 @@ call pop_next_credential
 if HAS_CRED = 0 then
     ; インライン候補が尽きた場合、フォールバック許可時なら外部CSVへ移行
     strlen CRED_FILE
-    if result > 0 and F_CRED_TRIED = 0 then
-        if HAS_DEV_CRED = 0 or FALLBACK_TO_CRED_FILE = 1 then
+    if (result > 0) and (F_CRED_TRIED = 0) then
+        if (HAS_DEV_CRED = 0) or (FALLBACK_TO_CRED_FILE = 1) then
             goto open_cred_csv_file
         endif
     endif
@@ -645,7 +656,7 @@ if result = 0 then
 endif
 
 if HAS_ORIG_PROTO = 0 then
-    if SSH_PORT_DEAD = 0 and TELNET_PORT_DEAD = 0 then
+    if (SSH_PORT_DEAD = 0) and (TELNET_PORT_DEAD = 0) then
         DEV_PROTO = 'ssh'
         PROTO_DUAL_PHASE = 1
     elseif SSH_PORT_DEAD = 0 then
@@ -676,6 +687,12 @@ fileopen f_cred CRED_FILE 0 1
 if f_cred = -1 then
     if AUTH_ATTEMPT > 0 then
         DEV_STATUS = 'NG'
+        strlen LAST_FAIL_DETAIL
+        if result > 0 then
+            DEV_DETAIL = LAST_FAIL_DETAIL
+        else
+            DEV_DETAIL = 'Auth Failed'
+        endif
         goto record_result
     endif
     if FALLBACK_TO_BASTION_CRED = 1 then
@@ -732,17 +749,27 @@ call parse_cred_line
 ; ヘッダ行スキップ
 strcompare C_USER 'ユーザー名'
 if result = 0 goto read_cred_csv_loop
+strcompare C_USER 'ユーザ名'
+if result = 0 goto read_cred_csv_loop
 strcompare C_USER 'username'
 if result = 0 goto read_cred_csv_loop
 strcompare C_USER 'Username'
 if result = 0 goto read_cred_csv_loop
+strcompare C_USER 'USERNAME'
+if result = 0 goto read_cred_csv_loop
+strcompare C_USER 'user'
+if result = 0 goto read_cred_csv_loop
+strcompare C_USER 'User'
+if result = 0 goto read_cred_csv_loop
+strcompare C_USER 'USER'
+if result = 0 goto read_cred_csv_loop
 
-; 空行スキップ
+; 空行スキップ (※Tera Termでは and の優先順位が = より高いため必ず括弧で囲む)
 strlen C_USER
 CU_LEN = result
 strlen C_PASS
 CP_LEN = result
-if CU_LEN = 0 and CP_LEN = 0 goto read_cred_csv_loop
+if (CU_LEN = 0) and (CP_LEN = 0) goto read_cred_csv_loop
 
 if CU_LEN = 0 then
     if FALLBACK_TO_BASTION_CRED = 1 then
@@ -806,7 +833,7 @@ else
         PROTO_DUAL_PHASE = 0
     else
         ; どちらも未指定なら両方試す (まずSSH、失敗時Telnet)
-        if SSH_PORT_DEAD = 0 and TELNET_PORT_DEAD = 0 then
+        if (SSH_PORT_DEAD = 0) and (TELNET_PORT_DEAD = 0) then
             DEV_PROTO = 'ssh'
             PROTO_DUAL_PHASE = 1
         elseif SSH_PORT_DEAD = 0 then
@@ -827,7 +854,7 @@ else
 endif
 
 ; 直前の device.csv 固有認証と全く同一なら二重試行をスキップ
-if HAS_DEV_CRED = 1 and HAS_ORIG_PROTO = 1 and AUTH_ATTEMPT = 1 then
+if ((HAS_DEV_CRED = 1) and (HAS_ORIG_PROTO = 1)) and (AUTH_ATTEMPT = 1) then
     strcompare C_USER DEV_USER
     if result = 0 then
         strcompare C_PASS DEV_PASS
@@ -874,7 +901,7 @@ goto record_result
 ; --- C) 接続コマンド発行 (SSH / Telnet + 踏み台復帰マーカー) ---
 :issue_connect_cmd
 ; 2回目以降の試行時はウェイトを挿入（実機のブルートフォース防御回避。プロトコル切替時は即試行）
-if AUTH_ATTEMPT > 1 and SKIP_RETRY_WAIT = 0 then
+if (AUTH_ATTEMPT > 1) and (SKIP_RETRY_WAIT = 0) then
     if AUTH_RETRY_INTERVAL > 0 then
         pause AUTH_RETRY_INTERVAL
     else
@@ -919,8 +946,16 @@ strcompare DEV_PROTO 'telnet'
 if result = 0 goto do_telnet
 
 ; --- SSH接続コマンド発行 (255バイト制限を回避するため分割送信) ---
-; NumberOfPasswordPrompts=1 により、PW誤り時にSSHが即座に正常終了して踏み台へ戻ります
-send 'ssh -o NumberOfPasswordPrompts=1 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null '
+; NumberOfPasswordPrompts=1 : PW誤り時にSSHが即座に正常終了して踏み台へ戻ります
+; PubkeyAuthentication=no & PreferredAuthentications=keyboard-interactive,password :
+;   踏み台の秘密鍵/ssh-agentによるMaxAuthTries切断や、GSSAPIの10〜30秒遅延を防止します
+send 'ssh -o NumberOfPasswordPrompts=1 -o StrictHostKeyChecking=no '
+send '-o UserKnownHostsFile=/dev/null -o PubkeyAuthentication=no '
+send '-o PreferredAuthentications=keyboard-interactive,password '
+if SSH_LEGACY_MODE = 1 then
+    send '-o KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1 '
+    send '-o HostKeyAlgorithms=+ssh-rsa -o Ciphers=+aes128-cbc,3des-cbc,aes192-cbc,aes256-cbc '
+endif
 strlen SSH_EXTRA_OPTS
 if result > 0 then
     send SSH_EXTRA_OPTS
@@ -943,7 +978,7 @@ sendln ' ; echo "__BAS""TION_RETURN__"'
 
 
 ; ==============================================================================
-; 8. 2段階ログイン交渉ループ (SSH / Telnet 完全対応・誤検知防止)
+; 8. 2段階ログイン交渉ループ (SSH / Telnet 完全分離・誤検知防止)
 ; ==============================================================================
 :login_negotiate_loop
 LOGIN_SUCCESS = 0
@@ -951,36 +986,29 @@ INIT_PROMPT_IDX = 0
 STAGE1_USER_SENT = 0
 
 ; ------------------------------------------------------
-; 【第1段階】パスワード送信前の待機 (バナー内の '#', '>', '$' に誤反応しない)
+; 【第1段階】パスワード送信前の待機 (SSHとTelnetを明確に分離)
 ; ------------------------------------------------------
 :login_stage1_loop
 timeout = LOGIN_TIMEOUT
+strcompare DEV_PROTO 'telnet'
+if result = 0 goto login_stage1_telnet
+
+; --- SSH 第1段階 ---
+; ※SSHはコマンド引数でユーザー名を渡すため 'login:'/'User:' 等を待たない（バナー誤爆防止）
 ; wait引数(10個厳守):
-; 1:__BASTION_RETURN__, 2:yes/no, 3:login:, 4:Login:, 5:Username:,
-; 6:User:, 7:assword:, 8:PASSWORD:, 9:no matching, 10:refused
-wait '__BASTION_RETURN__' 'yes/no' 'login:' 'Login:' 'Username:' 'User:' 'assword:' 'PASSWORD:' 'no matching' 'refused'
+; 1:__BASTION_RETURN__, 2:yes/no, 3:assword:, 4:PASSWORD:, 5:Passcode:,
+; 6:passphrase, 7:no matching, 8:no mutual, 9:Connection refused, 10:パスワード
+wait '__BASTION_RETURN__' 'yes/no' 'assword:' 'PASSWORD:' 'Passcode:' 'passphrase' 'no matching' 'no mutual' 'Connection refused' 'パスワード'
 STAGE1_RES = result
 
 if STAGE1_RES = 1 then
-    ; SSH/Telnetがパスワード画面前に終了して踏み台に戻った
+    ; SSHがパスワード画面前に終了して踏み台に戻った
     mpause 200
     flushrecv
-    strcompare DEV_PROTO 'telnet'
-    if result = 0 then
-        ; Telnetは接続に認証情報を使わないため、ログイン画面前に閉じた場合はTelnet非対応と確定
-        TELNET_PORT_DEAD = 1
-        LAST_FAIL_DETAIL = 'Telnet Not Accepted / Closed by Host'
-        if HAS_ORIG_PROTO = 1 or SSH_PORT_DEAD = 1 then
-            DEV_STATUS = 'NG'
-            DEV_DETAIL = LAST_FAIL_DETAIL
-            goto record_result
-        endif
-        goto check_next_credential
-    endif
     if PROTO_DUAL_PHASE = 1 then
         SKIP_RETRY_WAIT = 1
     endif
-    LAST_FAIL_DETAIL = 'Connection Failed / Closed by Host'
+    LAST_FAIL_DETAIL = 'SSH Closed Before Password Prompt'
     goto check_next_credential
 endif
 
@@ -992,7 +1020,115 @@ if STAGE1_RES = 2 then
     goto login_stage1_loop
 endif
 
-if STAGE1_RES >= 3 and STAGE1_RES <= 6 then
+if ((STAGE1_RES = 3) or (STAGE1_RES = 4)) or ((STAGE1_RES = 5) or (STAGE1_RES = 10)) then
+    ; パスワード入力要求 (Password: / PASSWORD: / Passcode: / パスワード) -> パスワードを送信して【第2段階】へ進む
+    testlink
+    if result <> 2 goto bastion_disconnected
+    sendln ACTIVE_PASS
+    goto login_stage2_wait
+endif
+
+if STAGE1_RES = 6 then
+    ; 秘密鍵パスフレーズ要求が出てしまった場合 -> 安全に中断
+    call abort_to_bastion
+    LAST_FAIL_DETAIL = 'SSH Key Passphrase Prompted'
+    goto check_next_credential
+endif
+
+if (STAGE1_RES = 7) or (STAGE1_RES = 8) then
+    ; 古い機器でSSH鍵交換/ホスト鍵/暗号アルゴリズムが不一致の場合
+    timeout = 5
+    wait '__BASTION_RETURN__'
+    if result = 0 then
+        call abort_to_bastion
+    else
+        mpause 150
+        flushrecv
+    endif
+    if SSH_LEGACY_MODE = 0 then
+        ; 1回目の不一致時は自動で旧アルゴリズム互換オプションを有効にして即リトライ
+        SSH_LEGACY_MODE = 1
+        SKIP_RETRY_WAIT = 1
+        getdate TS '%Y/%m/%d %H:%M:%S'
+        fileopen f_att ATTEMPT_LOG_FILE 1
+        if f_att <> -1 then
+            sprintf '%s,%s,%s,#%d,%s,%s,-,RETRY_LEGACY_SSH (Algorithm Mismatch)' TS DEV_NAME DEV_IP AUTH_ATTEMPT DEV_PROTO ACTIVE_USER
+            filewriteln f_att inputstr
+            fileclose f_att
+        endif
+        goto issue_connect_cmd
+    endif
+    SSH_PORT_DEAD = 1
+    LAST_FAIL_DETAIL = 'SSH Algorithm Mismatch (Check SSH_EXTRA_OPTS)'
+    if PROTO_DUAL_PHASE = 1 then
+        SKIP_RETRY_WAIT = 1
+        goto check_next_credential
+    endif
+    if (HAS_ORIG_PROTO = 0) and (F_CRED_OPEN = 1) then
+        SKIP_RETRY_WAIT = 1
+        goto check_next_credential
+    endif
+    DEV_STATUS = 'NG'
+    DEV_DETAIL = LAST_FAIL_DETAIL
+    goto record_result
+endif
+
+if STAGE1_RES = 9 then
+    ; Connection refused (ポート22が閉じている)
+    timeout = 5
+    wait '__BASTION_RETURN__'
+    if result = 0 then
+        call abort_to_bastion
+    else
+        mpause 150
+        flushrecv
+    endif
+    SSH_PORT_DEAD = 1
+    LAST_FAIL_DETAIL = 'Connection Refused / Unreachable'
+    if HAS_ORIG_PROTO = 0 then
+        if (SSH_PORT_DEAD = 1) and (TELNET_PORT_DEAD = 1) then
+            DEV_STATUS = 'NG'
+            DEV_DETAIL = 'Connection Refused (SSH & Telnet)'
+            goto record_result
+        endif
+        SKIP_RETRY_WAIT = 1
+        goto check_next_credential
+    endif
+    DEV_STATUS = 'NG'
+    DEV_DETAIL = LAST_FAIL_DETAIL
+    goto record_result
+endif
+
+; SSH 第1段階タイムアウト (STAGE1_RES = 0):
+; ※空Enterを送るとNumberOfPasswordPrompts=1で空PW送信になり自爆するため、安全に中断して次候補へ
+call abort_to_bastion
+LAST_FAIL_DETAIL = 'SSH Login Timeout (No Password Prompt)'
+goto check_next_credential
+
+
+; --- Telnet 第1段階 ---
+:login_stage1_telnet
+; wait引数(10個厳守):
+; 1:__BASTION_RETURN__, 2:login:, 3:Login:, 4:Username:, 5:User:,
+; 6:assword:, 7:PASSWORD:, 8:Connection refused, 9:refused, 10:パスワード
+wait '__BASTION_RETURN__' 'login:' 'Login:' 'Username:' 'User:' 'assword:' 'PASSWORD:' 'Connection refused' 'refused' 'パスワード'
+STAGE1_RES = result
+
+if STAGE1_RES = 1 then
+    ; Telnetは接続に認証情報を使わないため、ログイン画面前に閉じた場合はTelnet非対応と確定
+    mpause 200
+    flushrecv
+    TELNET_PORT_DEAD = 1
+    LAST_FAIL_DETAIL = 'Telnet Not Accepted / Closed by Host'
+    if (HAS_ORIG_PROTO = 1) or (SSH_PORT_DEAD = 1) then
+        DEV_STATUS = 'NG'
+        DEV_DETAIL = LAST_FAIL_DETAIL
+        goto record_result
+    endif
+    goto check_next_credential
+endif
+
+if (STAGE1_RES >= 2) and (STAGE1_RES <= 5) then
     ; ユーザー名入力要求 (login: / Login: / Username: / User:)
     STAGE1_USER_SENT = STAGE1_USER_SENT + 1
     if STAGE1_USER_SENT >= 2 then
@@ -1009,47 +1145,28 @@ if STAGE1_RES >= 3 and STAGE1_RES <= 6 then
     goto login_stage1_loop
 endif
 
-if STAGE1_RES = 7 or STAGE1_RES = 8 then
-    ; パスワード入力要求 (Password: / PASSWORD:) -> パスワードを送信して【第2段階】へ進む
+if ((STAGE1_RES = 6) or (STAGE1_RES = 7)) or (STAGE1_RES = 10) then
+    ; パスワード入力要求 (Password: / PASSWORD: / パスワード) -> パスワードを送信して【第2段階】へ進む
     testlink
     if result <> 2 goto bastion_disconnected
     sendln ACTIVE_PASS
     goto login_stage2_wait
 endif
 
-if STAGE1_RES = 9 then
-    ; 古い機器でSSH鍵交換アルゴリズム等が不一致の場合
+if (STAGE1_RES = 8) or (STAGE1_RES = 9) then
+    ; Connection refused (ポート23が閉じている)
     timeout = 5
     wait '__BASTION_RETURN__'
-    SSH_PORT_DEAD = 1
-    LAST_FAIL_DETAIL = 'SSH Algorithm Mismatch (Check SSH_EXTRA_OPTS)'
-    if PROTO_DUAL_PHASE = 1 then
-        SKIP_RETRY_WAIT = 1
-        goto check_next_credential
-    endif
-    if HAS_ORIG_PROTO = 0 and F_CRED_OPEN = 1 then
-        SKIP_RETRY_WAIT = 1
-        goto check_next_credential
-    endif
-    DEV_STATUS = 'NG'
-    DEV_DETAIL = LAST_FAIL_DETAIL
-    goto record_result
-endif
-
-if STAGE1_RES = 10 then
-    ; Connection refused (対象ポートが閉じている)
-    timeout = 5
-    wait '__BASTION_RETURN__'
-    strcompare DEV_PROTO 'ssh'
     if result = 0 then
-        SSH_PORT_DEAD = 1
+        call abort_to_bastion
     else
-        TELNET_PORT_DEAD = 1
+        mpause 150
+        flushrecv
     endif
+    TELNET_PORT_DEAD = 1
     LAST_FAIL_DETAIL = 'Connection Refused / Unreachable'
     if HAS_ORIG_PROTO = 0 then
-        ; プロトコル未指定機器なら別プロトコル(例: SSH拒否 -> Telnet)を待機なしで即試行
-        if SSH_PORT_DEAD = 1 and TELNET_PORT_DEAD = 1 then
+        if (SSH_PORT_DEAD = 1) and (TELNET_PORT_DEAD = 1) then
             DEV_STATUS = 'NG'
             DEV_DETAIL = 'Connection Refused (SSH & Telnet)'
             goto record_result
@@ -1063,7 +1180,7 @@ if STAGE1_RES = 10 then
 endif
 
 if STAGE1_RES = 0 then
-    ; タイムアウト時: __BASTION_RETURN__を消さないようflushrecvせずEnterを1回送り確認
+    ; Telnet タイムアウト時: Enterを1回送りプロンプト出現を確認
     testlink
     if result <> 2 goto bastion_disconnected
     sendln ''
@@ -1072,18 +1189,15 @@ if STAGE1_RES = 0 then
     ; 1:__BASTION_RETURN__, 2:assword:, 3:login:, 4:Login:, 5:Username:, 6:invalid, 7:>, 8:#, 9:$, 10:]
     wait '__BASTION_RETURN__' 'assword:' 'login:' 'Login:' 'Username:' 'invalid' '>' '#' '$' ']'
     if result = 1 then
-        strcompare DEV_PROTO 'telnet'
-        if result = 0 then
-            if STAGE1_USER_SENT = 0 then
-                TELNET_PORT_DEAD = 1
-                LAST_FAIL_DETAIL = 'Telnet Not Accepted / Closed'
-                if HAS_ORIG_PROTO = 1 or SSH_PORT_DEAD = 1 then
-                    DEV_STATUS = 'NG'
-                    DEV_DETAIL = LAST_FAIL_DETAIL
-                    goto record_result
-                endif
-                goto check_next_credential
+        if STAGE1_USER_SENT = 0 then
+            TELNET_PORT_DEAD = 1
+            LAST_FAIL_DETAIL = 'Telnet Not Accepted / Closed'
+            if (HAS_ORIG_PROTO = 1) or (SSH_PORT_DEAD = 1) then
+                DEV_STATUS = 'NG'
+                DEV_DETAIL = LAST_FAIL_DETAIL
+                goto record_result
             endif
+            goto check_next_credential
         endif
         LAST_FAIL_DETAIL = 'Connection Timed Out / Closed'
         goto check_next_credential
@@ -1094,7 +1208,7 @@ if STAGE1_RES = 0 then
         sendln ACTIVE_PASS
         goto login_stage2_wait
     endif
-    if result >= 3 and result <= 5 then
+    if (result >= 3) and (result <= 5) then
         if STAGE1_USER_SENT = 0 then
             STAGE1_USER_SENT = 1
             testlink
@@ -1115,7 +1229,7 @@ if STAGE1_RES = 0 then
         LAST_FAIL_DETAIL = 'Auth Failed (Invalid)'
         goto check_next_credential
     endif
-    if result >= 7 and result <= 10 then
+    if (result >= 7) and (result <= 10) then
         LOGIN_SUCCESS = 1
         if result = 7 then
             INIT_PROMPT_IDX = 1
@@ -1132,19 +1246,16 @@ if STAGE1_RES = 0 then
 
     ; 応答なし -> 接続試行を安全に中断して踏み台へ復帰
     call abort_to_bastion
-    strcompare DEV_PROTO 'telnet'
-    if result = 0 then
-        if STAGE1_USER_SENT = 0 then
-            ; Telnetで一度もログイン画面が出ずにタイムアウト -> Telnet非対応と確定し以降のTelnet試行を停止
-            TELNET_PORT_DEAD = 1
-            LAST_FAIL_DETAIL = 'Telnet Not Accepted (Timeout)'
-            if HAS_ORIG_PROTO = 1 or SSH_PORT_DEAD = 1 then
-                DEV_STATUS = 'NG'
-                DEV_DETAIL = LAST_FAIL_DETAIL
-                goto record_result
-            endif
-            goto check_next_credential
+    if STAGE1_USER_SENT = 0 then
+        ; Telnetで一度もログイン画面が出ずにタイムアウト -> Telnet非対応と確定し以降のTelnet試行を停止
+        TELNET_PORT_DEAD = 1
+        LAST_FAIL_DETAIL = 'Telnet Not Accepted (Timeout)'
+        if (HAS_ORIG_PROTO = 1) or (SSH_PORT_DEAD = 1) then
+            DEV_STATUS = 'NG'
+            DEV_DETAIL = LAST_FAIL_DETAIL
+            goto record_result
         endif
+        goto check_next_credential
     endif
     LAST_FAIL_DETAIL = 'Login Timeout'
     goto check_next_credential
@@ -1158,12 +1269,21 @@ endif
 ; ------------------------------------------------------
 :login_stage2_wait
 timeout = LOGIN_TIMEOUT
-; wait引数(10個厳守):
-; 1:__BASTION_RETURN__, 2:assword:, 3:Permission denied, 4:Login invalid,
-; 5:Authentication fail, 6:incorrect, 7:Username:, 8:>, 9:#, 10:$
-wait '__BASTION_RETURN__' 'assword:' 'Permission denied' 'Login invalid' 'Authentication fail' 'incorrect' 'Username:' '>' '#' '$'
+strcompare DEV_PROTO 'telnet'
+if result = 0 then
+    ; Telnet 第2段階 wait引数(10個厳守):
+    ; 1:__BASTION_RETURN__, 2:assword:, 3:Login invalid, 4:Authentication fail,
+    ; 5:incorrect, 6:Username:, 7:>, 8:#, 9:$, 10:]
+    wait '__BASTION_RETURN__' 'assword:' 'Login invalid' 'Authentication fail' 'incorrect' 'Username:' '>' '#' '$' ']'
+else
+    ; SSH 第2段階 wait引数(10個厳守):
+    ; 1:__BASTION_RETURN__, 2:assword:, 3:Permission denied, 4:Authentication fail,
+    ; 5:Access denied, 6:incorrect, 7:>, 8:#, 9:$, 10:]
+    wait '__BASTION_RETURN__' 'assword:' 'Permission denied' 'Authentication fail' 'Access denied' 'incorrect' '>' '#' '$' ']'
+endif
+STAGE2_RES = result
 
-if result = 1 then
+if STAGE2_RES = 1 then
     ; パスワード送信直後に切断されて踏み台へ戻った
     mpause 200
     flushrecv
@@ -1171,7 +1291,7 @@ if result = 1 then
     goto check_next_credential
 endif
 
-if result >= 2 and result <= 7 then
+if (STAGE2_RES >= 2) and (STAGE2_RES <= 6) then
     ; 認証失敗: Telnetの場合のみ後続プロンプトを掃除。SSHは__BASTION_RETURN__を消さないようそのまま復帰へ
     strcompare DEV_PROTO 'telnet'
     if result = 0 then
@@ -1183,24 +1303,27 @@ if result >= 2 and result <= 7 then
     goto check_next_credential
 endif
 
-if result >= 8 and result <= 10 then
+if (STAGE2_RES >= 7) and (STAGE2_RES <= 10) then
     ; ログイン成功！対象機器のプロンプトに到達
     LOGIN_SUCCESS = 1
-    if result = 8 then
+    if STAGE2_RES = 7 then
         ; 一般モード (>)
         INIT_PROMPT_IDX = 1
-    elseif result = 9 then
+    elseif STAGE2_RES = 8 then
         ; 特権モード (#)
         INIT_PROMPT_IDX = 2
-    else
+    elseif STAGE2_RES = 9 then
         ; シェルモード ($)
         INIT_PROMPT_IDX = 3
+    else
+        ; Huawei/H3C (])
+        INIT_PROMPT_IDX = 5
     endif
     IS_DEVICE_LOGGED_IN = 1
     goto login_success_exit
 endif
 
-if result = 0 then
+if STAGE2_RES = 0 then
     ; パスワード送信後にタイムアウトした場合、__BASTION_RETURN__を消さずにEnterを1回送り確認 (] も含む)
     testlink
     if result <> 2 goto bastion_disconnected
@@ -1216,7 +1339,7 @@ if result = 0 then
         LAST_FAIL_DETAIL = 'Auth Rejected / Closed by Host'
         goto check_next_credential
     endif
-    if result >= 2 and result <= 6 then
+    if (result >= 2) and (result <= 6) then
         strcompare DEV_PROTO 'telnet'
         if result = 0 then
             mpause 300
@@ -1226,7 +1349,7 @@ if result = 0 then
         LAST_FAIL_DETAIL = 'Auth Failed (Wrong Password)'
         goto check_next_credential
     endif
-    if result >= 7 and result <= 10 then
+    if (result >= 7) and (result <= 10) then
         LOGIN_SUCCESS = 1
         if result = 7 then
             INIT_PROMPT_IDX = 1
@@ -1250,6 +1373,15 @@ endif
 ; ★【認証失敗時の次候補判定】
 ; ------------------------------------------------------
 :check_next_credential
+; 直前の試行の失敗理由を attempts_*.csv にも記録（原因を完全に可視化）
+getdate TS '%Y/%m/%d %H:%M:%S'
+fileopen f_att ATTEMPT_LOG_FILE 1
+if f_att <> -1 then
+    sprintf '%s,%s,%s,#%d,%s,%s,-,FAIL (%s)' TS DEV_NAME DEV_IP AUTH_ATTEMPT DEV_PROTO ACTIVE_USER LAST_FAIL_DETAIL
+    filewriteln f_att inputstr
+    fileclose f_att
+endif
+
 ; 両方試すモード (PROTO_DUAL_PHASE = 1: SSH失敗時) なら、同一認証情報でTelnetを試行
 if PROTO_DUAL_PHASE = 1 then
     PROTO_DUAL_PHASE = 2
@@ -1272,14 +1404,14 @@ strlen REMAIN_USERS
 REM_U_LEN = result
 strlen REMAIN_PASS
 REM_P_LEN = result
-if REM_U_LEN > 0 or REM_P_LEN > 0 then
+if (REM_U_LEN > 0) or (REM_P_LEN > 0) then
     goto try_inline_credential
 endif
 
 ; 3) インライン指定が尽き、外部パスワードCSVがあり、かつフォールバック許可時なら外部ファイルを開く
 strlen CRED_FILE
-if result > 0 and F_CRED_TRIED = 0 then
-    if HAS_DEV_CRED = 0 or FALLBACK_TO_CRED_FILE = 1 then
+if (result > 0) and (F_CRED_TRIED = 0) then
+    if (HAS_DEV_CRED = 0) or (FALLBACK_TO_CRED_FILE = 1) then
         goto open_cred_csv_file
     endif
 endif
@@ -1366,7 +1498,7 @@ elseif result = 2 then
         DEV_STATUS = 'NG'
         DEV_DETAIL = 'Disconnected During Enable Password'
         goto cleanup_done
-    elseif result >= 5 and result <= 9 then
+    elseif (result >= 5) and (result <= 9) then
         ; 管理者パスワード誤り: パスワード待機プロンプトに残らないよう安全に解除
         ENABLE_FAILED = 1
         if result = 5 then
@@ -1385,7 +1517,7 @@ elseif result = 2 then
             endif
         endif
     endif
-elseif result >= 5 and result <= 9 then
+elseif (result >= 5) and (result <= 9) then
     ; enable コマンドが拒否された場合 (Yamahaルータ等のため administrator を試行)
     mpause 200
     flushrecv
@@ -1412,7 +1544,7 @@ elseif result >= 5 and result <= 9 then
             DEV_STATUS = 'NG'
             DEV_DETAIL = 'Disconnected During Administrator Password'
             goto cleanup_done
-        elseif result = 5 or result = 6 then
+        elseif (result = 5) or (result = 6) then
             ENABLE_FAILED = 1
             if result = 5 then
                 send #3
@@ -1455,8 +1587,8 @@ if result = 1 then
     DEV_DETAIL = 'Disconnected During Paging Disable'
     goto cleanup_done
 endif
-if result >= 6 and result <= 9 goto detect_final_prompt
-if result >= 2 and result <= 5 then
+if (result >= 6) and (result <= 9) goto detect_final_prompt
+if (result >= 2) and (result <= 5) then
     wait '__BASTION_RETURN__' '#' '>' '$' ']'
     if result = 1 then
         IS_DEVICE_LOGGED_IN = 0
@@ -1477,8 +1609,8 @@ if result = 1 then
     DEV_DETAIL = 'Disconnected During Paging Disable'
     goto cleanup_done
 endif
-if result >= 6 and result <= 9 goto detect_final_prompt
-if result >= 2 and result <= 5 then
+if (result >= 6) and (result <= 9) goto detect_final_prompt
+if (result >= 2) and (result <= 5) then
     wait '__BASTION_RETURN__' '#' '>' '$' ']'
     if result = 1 then
         IS_DEVICE_LOGGED_IN = 0
@@ -1499,8 +1631,8 @@ if result = 1 then
     DEV_DETAIL = 'Disconnected During Paging Disable'
     goto cleanup_done
 endif
-if result >= 6 and result <= 9 goto detect_final_prompt
-if result >= 2 and result <= 5 then
+if (result >= 6) and (result <= 9) goto detect_final_prompt
+if (result >= 2) and (result <= 5) then
     wait '__BASTION_RETURN__' '#' '>' '$' ']'
     if result = 1 then
         IS_DEVICE_LOGGED_IN = 0
@@ -1546,7 +1678,7 @@ waitln '#' '>' '$' ']'
 WL_RES = result
 
 PROMPT_VALID = 0
-if WL_RES >= 1 and WL_RES <= 4 then
+if (WL_RES >= 1) and (WL_RES <= 4) then
     if WL_RES = 1 then
         PROMPT_SYMBOL = '#'
     elseif WL_RES = 2 then
@@ -1563,11 +1695,32 @@ if WL_RES >= 1 and WL_RES <= 4 then
 
     strlen CAND_PROMPT
     P_LEN = result
-    if P_LEN >= 1 and P_LEN <= 40 then
+    if (P_LEN >= 1) and (P_LEN <= 40) then
         strcopy CAND_PROMPT 1 1 P_FIRST
         strcopy CAND_PROMPT P_LEN 1 P_LAST
-        strcompare P_LAST PROMPT_SYMBOL
+        ; 末尾が #, >, $, ] のいずれかであれば妥当なプロンプト (例: [root@host ~]# にも対応)
+        P_END_OK = 0
+        strcompare P_LAST '#'
         if result = 0 then
+            P_END_OK = 1
+            PROMPT_SYMBOL = '#'
+        endif
+        strcompare P_LAST '>'
+        if result = 0 then
+            P_END_OK = 1
+            PROMPT_SYMBOL = '>'
+        endif
+        strcompare P_LAST '$'
+        if result = 0 then
+            P_END_OK = 1
+            PROMPT_SYMBOL = '$'
+        endif
+        strcompare P_LAST ']'
+        if result = 0 then
+            P_END_OK = 1
+            PROMPT_SYMBOL = ']'
+        endif
+        if P_END_OK = 1 then
             P_BAD = 0
             strcompare P_FIRST '%'
             if result = 0 then
@@ -1688,13 +1841,13 @@ wait FINAL_PROMPT '--More--' '-- More --' '---(more' 'More:' '続く' 'RETURN' '
 
 if result = 1 goto read_cmd_loop
 
-if result >= 2 and result <= 6 then
+if (result >= 2) and (result <= 6) then
     ; ページャー表示(--More--等)が出現したため、スペースキーを送信して続きを表示
     send ' '
     goto wait_cmd_prompt
 endif
 
-if result >= 7 and result <= 8 then
+if (result >= 7) and (result <= 8) then
     ; RETURN / any key 表示が出現したため、Enterキーを送信
     sendln ''
     goto wait_cmd_prompt
@@ -1757,7 +1910,7 @@ if IS_DEVICE_LOGGED_IN = 1 then
     ; wait引数(5個): 1:__BASTION_RETURN__, 2:Save new configuration ? (y/n), 3:Save? [yes/no], 4:(y/n), 5:[y/n]
     wait '__BASTION_RETURN__' 'Save new configuration ? (y/n)' 'Save? [yes/no]' '(y/n)' '[y/n]'
     if result = 1 goto cleanup_done
-    if result >= 2 and result <= 5 then
+    if (result >= 2) and (result <= 5) then
         testlink
         if result <> 2 goto bastion_disconnected
         sendln 'n'
@@ -1779,7 +1932,6 @@ if IS_DEVICE_LOGGED_IN = 1 then
     strcompare DEV_PROTO 'ssh'
     if result = 0 then
         ; OpenSSH のエスケープシーケンス (Enter + ~.) でネストSSHのみを安全に切断
-        ; ※万一すでに踏み台に戻っていても bash では '~.: command not found' となるだけで無害
         testlink
         if result <> 2 goto bastion_disconnected
         sendln ''
@@ -1787,7 +1939,12 @@ if IS_DEVICE_LOGGED_IN = 1 then
         send '~.'
         timeout = 3
         wait '__BASTION_RETURN__'
-        if result = 1 goto cleanup_done
+        if result = 1 then
+            ; 万一 quit が直前に終了して '~.' が踏み台の入力バッファに残っていた場合に備え Ctrl+C で掃除
+            send #3
+            mpause 150
+            goto cleanup_done
+        endif
     endif
     call abort_to_bastion
 endif
@@ -1934,10 +2091,11 @@ end
 ; サブルーチン0: 認証失敗・タイムアウト時の安全な踏み台復帰 (SSH / Telnet両対応)
 ; ==============================================================================
 :abort_to_bastion
-    ; 1) SSHは終了待ち1秒で即復帰。Telnetは自然終了しないことが多いため即座にCtrl+]へ進む
+    ; 1) SSHは終了待ち3秒(Linuxのpam_faildelay考慮)で自然終了を待つ。
+    ;    Telnetは自然終了しないことが多いため即座にCtrl+]へ進む
     strcompare DEV_PROTO 'telnet'
     if result <> 0 then
-        timeout = 1
+        timeout = 3
         wait '__BASTION_RETURN__'
         if result = 1 then
             mpause 100
@@ -1983,25 +2141,13 @@ end
             return
         endif
     else
-        ; SSH: まず OpenSSH エスケープシーケンス (Enter + ~.) で安全切断を試み、ダメなら Ctrl+C (#3)
-        testlink
-        if result <> 2 goto bastion_disconnected
-        sendln ''
-        mpause 150
-        send '~.'
-        timeout = 2
-        wait '__BASTION_RETURN__'
-        if result = 1 then
-            mpause 150
-            flushrecv
-            return
-        endif
-
+        ; SSH認証失敗・タイムアウト時は '~.' が未認証SSHで効かず bash の入力バッファを汚染するため
+        ; 安全に Ctrl+C (#3) のみで中断する
         testlink
         if result <> 2 goto bastion_disconnected
         send #3
         mpause 300
-        timeout = 1
+        timeout = 2
         wait '__BASTION_RETURN__'
         if result = 1 then
             mpause 150
@@ -2220,9 +2366,69 @@ return
     call trim_string
     DEV_PROTO = TRIM_VAL
 
+    ; COL7 (コマンドファイル) の余分なカンマ・インラインコメント除去 & トリム
+    strscan COL7 ','
+    if result > 0 then
+        COPY_LEN = result - 1
+        if COPY_LEN > 0 then
+            strcopy COL7 1 COPY_LEN COL7
+        else
+            COL7 = ''
+        endif
+    endif
+    strscan COL7 '#'
+    if result > 0 then
+        COPY_LEN = result - 1
+        if COPY_LEN > 0 then
+            strcopy COL7 1 COPY_LEN COL7
+        else
+            COL7 = ''
+        endif
+    endif
+    strscan COL7 ';'
+    if result > 0 then
+        COPY_LEN = result - 1
+        if COPY_LEN > 0 then
+            strcopy COL7 1 COPY_LEN COL7
+        else
+            COL7 = ''
+        endif
+    endif
     TRIM_VAL = COL7
     call trim_string
     DEV_CMD = TRIM_VAL
+
+    ; 4列短縮形式 (ホスト名,IP,ssh,コマンドファイル) の自動救済:
+    ; 5〜7列目が全て空で、3列目がプロトコル(ssh/telnet)かつ4列目が空または.txtの場合は自動補正
+    strlen DEV_ENPASS
+    P_C5 = result
+    strlen DEV_PROTO
+    P_C6 = result
+    strlen DEV_CMD
+    P_C7 = result
+    if ((P_C5 = 0) and (P_C6 = 0)) and (P_C7 = 0) then
+        NORM_PROTO = DEV_USER
+        call normalize_proto
+        strlen NORM_PROTO
+        if result > 0 then
+            P_C4_OK = 0
+            strlen DEV_PASS
+            if result = 0 then
+                P_C4_OK = 1
+            else
+                strscan DEV_PASS '.txt'
+                if result > 0 then
+                    P_C4_OK = 1
+                endif
+            endif
+            if P_C4_OK = 1 then
+                DEV_PROTO = NORM_PROTO
+                DEV_CMD = DEV_PASS
+                DEV_USER = ''
+                DEV_PASS = ''
+            endif
+        endif
+    endif
 return
 
 
@@ -2382,7 +2588,7 @@ return
     U_LEN = result
     strlen NEXT_P
     P_LEN = result
-    if U_LEN = 0 and P_LEN = 0 then
+    if (U_LEN = 0) and (P_LEN = 0) then
         HAS_CRED = 0
         return
     endif
@@ -2601,37 +2807,60 @@ return
 
 ; ==============================================================================
 ; サブルーチン5: プロトコル文字列の小文字正規化 ('ssh' / 'telnet' / '')
+;   ※ 'both' / 'auto' / 'ssh/telnet' や未知の文字列は '' (両方試行) に正規化
 ; 入力/出力: NORM_PROTO
 ; ==============================================================================
 :normalize_proto
+    NP_HAS_SSH = 0
+    NP_HAS_TEL = 0
+
     strscan NORM_PROTO 'ssh'
     if result > 0 then
-        NORM_PROTO = 'ssh'
-        return
+        NP_HAS_SSH = 1
     endif
     strscan NORM_PROTO 'SSH'
     if result > 0 then
-        NORM_PROTO = 'ssh'
-        return
+        NP_HAS_SSH = 1
     endif
     strscan NORM_PROTO 'Ssh'
     if result > 0 then
-        NORM_PROTO = 'ssh'
-        return
+        NP_HAS_SSH = 1
     endif
+    strcompare NORM_PROTO '22'
+    if result = 0 then
+        NP_HAS_SSH = 1
+    endif
+
     strscan NORM_PROTO 'telnet'
     if result > 0 then
-        NORM_PROTO = 'telnet'
-        return
+        NP_HAS_TEL = 1
     endif
     strscan NORM_PROTO 'TELNET'
     if result > 0 then
-        NORM_PROTO = 'telnet'
-        return
+        NP_HAS_TEL = 1
     endif
     strscan NORM_PROTO 'Telnet'
     if result > 0 then
+        NP_HAS_TEL = 1
+    endif
+    strcompare NORM_PROTO '23'
+    if result = 0 then
+        NP_HAS_TEL = 1
+    endif
+
+    if (NP_HAS_SSH = 1) and (NP_HAS_TEL = 1) then
+        ; ssh/telnet 両方記載 -> 両方試行 ('')
+        NORM_PROTO = ''
+        return
+    endif
+    if NP_HAS_SSH = 1 then
+        NORM_PROTO = 'ssh'
+        return
+    endif
+    if NP_HAS_TEL = 1 then
         NORM_PROTO = 'telnet'
         return
     endif
+    ; 'both', 'auto', '-', 空欄、その他不正文字は全て '' (両方試行) に正規化
+    NORM_PROTO = ''
 return

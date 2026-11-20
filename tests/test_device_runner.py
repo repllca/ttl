@@ -448,6 +448,34 @@ class TestCredentialQueueSubroutine(unittest.TestCase):
                         code = line.split(";", 1)[0]
                         self.assertNotIn(r"\n", code, f"Found raw \\n in {filename}:{line_no} - use CRLF (#13#10) instead")
 
+    def test_parenthesized_and_or_conditions(self):
+        """
+        Verify that EVERY 'and'/'or' in device_runner.ttl has parenthesized operands.
+        In real Tera Term TTL, bitwise 'and' (prec 5) / 'or' (prec 7) bind TIGHTER than
+        comparison operators '<, >, <=, >=, =, <>' (prec 8-9), so unparenthesized
+        'if A = 0 and B = 0' is silently mis-parsed as '(A = (0 and B)) = 0'!
+        """
+        with open(TTL_FILE, "r", encoding="utf-8") as f:
+            for line_no, raw in enumerate(f, 1):
+                code = raw.split(";", 1)[0].strip()
+                if not code:
+                    continue
+                m = re.match(r"^(?:if|elseif)\s+(.+?)\s+(?:then|goto\s+\S+)\s*$", code, re.IGNORECASE)
+                if not m:
+                    continue
+                cond = m.group(1)
+                if not re.search(r"\b(?:and|or)\b", cond, re.IGNORECASE):
+                    continue
+                # Every 'and'/'or' must be immediately preceded by ')' and immediately followed by '('
+                for op_m in re.finditer(r"\b(?:and|or)\b", cond, re.IGNORECASE):
+                    before = cond[:op_m.start()].rstrip()
+                    after = cond[op_m.end():].lstrip()
+                    self.assertTrue(
+                        before.endswith(")") and after.startswith("("),
+                        f"Line {line_no}: Unparenthesized '{op_m.group(0)}' in TTL condition "
+                        f"(real Tera Term evaluates and/or BEFORE =/<>): {code}"
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()

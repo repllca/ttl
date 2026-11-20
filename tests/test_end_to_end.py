@@ -731,6 +731,82 @@ class TestEndToEndSimulation(unittest.TestCase):
                 if os.path.exists(p):
                     os.remove(p)
 
+    def test_legacy_ssh_auto_fallback_and_4col_shorthand_csv(self):
+        """
+        Verify:
+        1. Legacy SSH device (192.168.10.249) fails initial modern SSH with 'no matching',
+           then automatically retries with legacy KexAlgorithms/HostKeyAlgorithms/Ciphers
+           and succeeds without manual SSH_EXTRA_OPTS edits!
+        2. 4-column shorthand device.csv ('HOST,IP,ssh,commands_cisco.txt') is auto-normalized
+           and uses credentials.csv cleanly!
+        3. attempts_*.csv records per-attempt RETRY_LEGACY_SSH and FAIL details.
+        """
+        import tempfile
+        logs_dir = os.path.join(WORKSPACE_DIR, "logs")
+        if os.path.exists(logs_dir):
+            import shutil
+            shutil.rmtree(logs_dir)
+
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", dir=WORKSPACE_DIR, delete=False, encoding="utf-8") as tf_cred:
+            # Blank protocol column = works for BOTH ssh and telnet (foolproof pattern)
+            tf_cred.write(
+                "# Username,Password,EnablePassword,Protocol\n"
+                "wrong_user,WrongPass,,\n"
+                "admin,Pass1234,EnablePass123,\n"
+            )
+            temp_cred = tf_cred.name
+
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", dir=WORKSPACE_DIR, delete=False, encoding="utf-8") as tf_dev:
+            # 1) Legacy SSH device (standard 7-col)
+            # 2) Modern SSH device written in 4-col shorthand (Host,IP,ssh,commands_cisco.txt)
+            tf_dev.write(
+                "# Hostname,IP,Username,Password,EnablePassword,Protocol,CommandFile\n"
+                "LEGACY-SSH-01,192.168.10.249,,,,ssh,commands_cisco.txt\n"
+                "SHORTHAND-SSH-01,192.168.10.1,ssh,commands_cisco.txt\n"
+            )
+            temp_dev = tf_dev.name
+
+        try:
+            session = MockSession()
+            engine = TTLEngine(
+                WORKSPACE_DIR,
+                session,
+                params=["device_runner.ttl", "logs", "mock_pass", temp_dev, temp_cred]
+            )
+            engine.load_script(TTL_FILE)
+            engine.run()
+
+            summary_files = glob.glob(os.path.join(logs_dir, "summary_*.csv"))
+            self.assertGreater(len(summary_files), 0)
+            with open(summary_files[-1], "r", encoding="utf-8") as f:
+                content = f.read()
+
+            lines = [l for l in content.splitlines() if l.strip() and not l.startswith("Timestamp")]
+            self.assertEqual(len(lines), 2, f"Expected 2 rows, got: {lines}")
+            res = {l.split(",")[1]: l.split(",") for l in lines}
+
+            # 1. Legacy SSH switch succeeded automatically via SSH_LEGACY_MODE!
+            self.assertEqual(res["LEGACY-SSH-01"][5], "OK")
+            self.assertEqual(res["LEGACY-SSH-01"][3], "ssh")
+            self.assertEqual(res["LEGACY-SSH-01"][7], "admin")
+
+            # 2. 4-column shorthand device.csv succeeded automatically via SSH!
+            self.assertEqual(res["SHORTHAND-SSH-01"][5], "OK")
+            self.assertEqual(res["SHORTHAND-SSH-01"][3], "ssh")
+            self.assertEqual(res["SHORTHAND-SSH-01"][7], "admin")
+
+            # 3. Verify attempts_*.csv recorded RETRY_LEGACY_SSH and FAIL (...) on wrong_user
+            attempt_files = glob.glob(os.path.join(logs_dir, "attempts_*.csv"))
+            self.assertGreater(len(attempt_files), 0)
+            with open(attempt_files[-1], "r", encoding="utf-8") as f:
+                att_content = f.read()
+            self.assertIn("RETRY_LEGACY_SSH", att_content)
+            self.assertIn("FAIL (Auth", att_content)
+        finally:
+            for p in (temp_cred, temp_dev):
+                if os.path.exists(p):
+                    os.remove(p)
+
 
 if __name__ == "__main__":
     unittest.main()

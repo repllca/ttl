@@ -1,27 +1,24 @@
 # ホスト名,IPアドレス,ユーザー名,パスワード,管理者パスワード,プロトコル,コマンドファイル
 # ==============================================================================
-# 【認証情報の指定方法】
+# 【一番確実な書き方（推奨パターン）】
 #
-# 方法1: 外部パスワードCSV (credentials.csv) を使う場合【最も簡単・推奨】
-#   ユーザー名・パスワード・管理者PWを「すべて空欄」にしておくだけで、
-#   credentials.csv に記載された (ユーザー名, パスワード, 管理者PW) のリストを
-#   上から順に自動試行します。パイプ記号で区切る必要はありません。
-#
-# 方法2: 機器固有のアカウント情報が決まっている場合
-#   CSVの該当列にユーザー名・パスワードを記載すれば、credentials.csv より優先して試行します。
-#
-# 方法3: 機器ごとにパイプ(|)区切りでインライン候補を指定する場合
-#   例: ユーザー名: admin|cisco / パスワード: Pass1|Pass2
+#   ★ポイント1: 必ず7列（カンマ6個）で記載し、ヘッダ行の先頭には # を付けます。
+#   ★ポイント2: credentials.csv を使う場合は、3〜5列目を完全空欄にします:
+#               例) ホスト名,IPアドレス,,,,ssh,commands_cisco.txt
+#                   (※「ホスト名,IPアドレス,ssh,commands_cisco.txt」の4列形式も自動救済対応済み)
+#   ★ポイント3: 6列目(プロトコル)を空欄にすると SSH → 失敗時 Telnet の順で自動試行します。
+#   ★ポイント4: 7列目(コマンドファイル)を空欄にすると commands_universal.txt を使用します。
+#   ★ポイント5: カンマの後ろに余分なカンマ・全角スペース・"-" 等の仮文字は入れないでください。
 # ==============================================================================
-# 1. 外部パスワードCSV (credentials.csv) を使って全自動ログインする機器（ユーザー・PW空欄）
+# 1. credentials.csv 自動ログイン（プロトコル空欄 = SSH/Telnet自動試行）
 AUTO-NODE-01,192.168.10.1,,,,,commands_cisco.txt
-# 2. Cisco等 (個別パスワード指定、管理者PW指定)
+# 2. Cisco等 (個別パスワード指定、管理者PW指定、SSH指定)
 RT-CISCO-01,192.168.10.1,admin,Pass1234,EnablePass123,ssh,commands_cisco.txt
 # 3. Cisco等 (管理者PW未記載 -> 通常PW流用)
 SW-CISCO-02,192.168.10.2,admin,Pass1234,,ssh,commands_cisco.txt
 # 4. Linux等 (enable不要機器、コマンド指定)
 SRV-LINUX-01,192.168.10.3,user1,Pass1234,,,commands_linux.txt
-# 5. Juniper等 (credentials.csv から自動認証)
+# 5. Juniper等 (credentials.csv からSSH自動認証: 3〜5列目を空欄で ,,,, )
 RT-JUNIPER-01,192.168.10.4,,,,ssh,commands_juniper.txt
 # 6. レガシーTelnet機器
 SW-LEGACY-01,192.168.10.5,admin,Pass1234,,telnet,commands_cisco.txt
