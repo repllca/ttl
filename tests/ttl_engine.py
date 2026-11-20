@@ -86,8 +86,9 @@ class TTLEngine:
                 if len(args) > 10:
                     raise SyntaxError(f"Line {line_num}: {first_word} command exceeds 10 arguments limit ({len(args)})")
 
-    def run(self):
-        self.verify_strict_402_compatibility()
+    def run(self, strict_402=True):
+        if strict_402:
+            self.verify_strict_402_compatibility()
         self.pc = 0
         step_count = 0
 
@@ -172,11 +173,59 @@ class TTLEngine:
                 fmt = m.group(1)[1:-1]
                 args_str = m.group(2).strip()
                 args = [self._eval_token(tok) for tok in re.findall(r"'[^']*'|\"[^\"]*\"|\S+", args_str)] if args_str else []
-                # Replace %s or %d with args
                 out = fmt
                 for a in args:
                     out = re.sub(r"%[sd]", lambda _: str(a), out, count=1)
                 self.vars["inputstr"] = out
+            self.pc += 1
+            return
+
+        if cmd == "sprintf2":
+            m = re.match(r"^sprintf2\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+('[^']*'|\"[^\"]*\")\s*(.*)$", code, re.IGNORECASE)
+            if m:
+                dest_var = m.group(1)
+                fmt = m.group(2)[1:-1]
+                args_str = m.group(3).strip()
+                args = [self._eval_token(tok) for tok in re.findall(r"'[^']*'|\"[^\"]*\"|\S+", args_str)] if args_str else []
+                out = fmt
+                for a in args:
+                    out = re.sub(r"%[sd]", lambda _: str(a), out, count=1)
+                self.vars[dest_var] = out
+                self.vars["result"] = 0
+            self.pc += 1
+            return
+
+        # 6b. strsplit <strval> <sep> [<count>] (Tera Term 4.67+)
+        if cmd == "strsplit":
+            tokens = re.findall(r"'[^']*'|\"[^\"]*\"|\S+", code[len(cmd):].strip())
+            src = str(self._eval_token(tokens[0]))
+            sep = str(self._eval_token(tokens[1]))
+            max_parts = min(9, int(self._eval_token(tokens[2]))) if len(tokens) >= 3 else 9
+            parts_out = src.split(sep, max_parts - 1) if sep else [src]
+            for idx_p in range(1, 10):
+                self.vars[f"groupmatchstr{idx_p}"] = parts_out[idx_p - 1] if idx_p <= len(parts_out) else ""
+            self.vars["result"] = len(parts_out)
+            self.pc += 1
+            return
+
+        # 6c. strtrim <strvar> <trimchars> (Tera Term 4.67+)
+        if cmd == "strtrim":
+            var = parts[1]
+            rest = code[len(cmd):].strip()[len(var):].strip()
+            trim_chars = str(self._eval_expr(rest))
+            old_val = str(self.vars.get(var, ""))
+            new_val = old_val.strip(trim_chars)
+            self.vars[var] = new_val
+            self.vars["result"] = 1 if new_val != old_val else 0
+            self.pc += 1
+            return
+
+        # 6d. tolower <destvar> <src> (Tera Term 4.53+)
+        if cmd == "tolower":
+            dest = parts[1]
+            rest = code[len(cmd):].strip()[len(dest):].strip()
+            src = str(self._eval_expr(rest))
+            self.vars[dest] = src.lower()
             self.pc += 1
             return
 
@@ -572,7 +621,7 @@ class TTLEngine:
         """
         token_re = re.compile(
             r"\s*("
-            r"<>|<=|>=|[=<>()]|"
+            r"&&|\|\||<>|<=|>=|==|!=|[=<>()]|"
             r"'[^']*'|\"[^\"]*\"|"
             r"-?\d+|"
             r"[a-zA-Z_][a-zA-Z0-9_]*"
@@ -609,12 +658,31 @@ class TTLEngine:
                     return 0
             return int(bool(val))
 
+        def parse_log_or():
+            left = parse_log_and()
+            while peek() == "||":
+                consume()
+                right = parse_log_and()
+                left = 1 if (to_int(left) != 0 or to_int(right) != 0) else 0
+            return left
+
+        def parse_log_and():
+            left = parse_eq()
+            while peek() == "&&":
+                consume()
+                right = parse_eq()
+                left = 1 if (to_int(left) != 0 and to_int(right) != 0) else 0
+            return left
+
         def parse_eq():
             left = parse_rel()
-            while peek() in ("=", "<>"):
+            while peek() in ("=", "==", "<>", "!="):
                 op = consume()
                 right = parse_rel()
-                if op == "=":
+                # Real Tera Term TTL forbids '=' / '<>' on strings ('Type mismatch')!
+                if isinstance(left, str) or isinstance(right, str):
+                    raise TypeError(f"TTL Type mismatch: cannot compare string with '{op}' in '{cond_str}' (use strcompare)")
+                if op in ("=", "=="):
                     left = 1 if left == right else 0
                 else:
                     left = 1 if left != right else 0
@@ -662,7 +730,7 @@ class TTLEngine:
             tok = peek()
             if tok == "(":
                 consume()
-                val = parse_eq()
+                val = parse_log_or()
                 if peek() == ")":
                     consume()
                 return val
@@ -683,8 +751,10 @@ class TTLEngine:
             return 0
 
         try:
-            res = parse_eq()
+            res = parse_log_or()
             return to_int(res) != 0
+        except TypeError:
+            raise
         except Exception:
             return False
 

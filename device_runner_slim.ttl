@@ -1,0 +1,1330 @@
+; ==============================================================================
+; ネットワーク機器・サーバ 参照系ログ自動収集マクロ [スリム版 / Tera Term 4.85+ / 5.x]
+; ==============================================================================
+; 現行 device_runner.ttl (4.02互換) から重複・インライン複数候補等を省き、
+; Tera Term 4.85+ (strsplit / strtrim / tolower / sprintf2 / && / ||) で半分以下に短縮した新版です。
+; マルチベンダー対応 (Cisco/Juniper/Yamaha/Huawei/Linux)・credentials.csv・SSH旧アルゴリズム自動リトライ・
+; Telnet即打ち切り・末尾改行なしEOF対応・4列短縮CSV自動救済はすべて維持しています。
+; ==============================================================================
+
+; --- 1. ユーザー設定 ---
+BASTION_HOST   = '192.168.1.1'
+BASTION_PORT   = '22'
+BASTION_USER   = 'bastion_user'
+BASTION_PROMPT = '$'
+
+SSH_EXTRA_OPTS = '-o ConnectTimeout=5'
+DEF_CSV_NAME   = 'device.csv'
+DEF_CRED_NAME  = 'credentials.csv'
+DEF_LOG_NAME   = 'logs'
+DEF_CMD_NAME   = 'commands_universal.txt'
+
+FALLBACK_TO_CRED_FILE    = 0        ; 1: device.csv固有PW失敗時にcredentials.csvも試行
+FALLBACK_TO_BASTION_CRED = 0        ; 0: 空欄時に踏み台ユーザーを流用しない(推奨)
+LOGIN_TIMEOUT       = 12            ; ログイン待機最大秒数
+CMD_TIMEOUT         = 30            ; コマンド応答待機最大秒数
+AUTH_RETRY_INTERVAL = 1             ; 認証失敗後の再試行間隔(秒)
+DEVICE_INTERVAL     = 1             ; 機器間の待機間隔(秒)
+
+; 定数
+getdir BASE_DIR
+CRLF = #13#10
+TRIM_WS = ' '
+strconcat TRIM_WS #9#13#10
+TRIM_FIELD = TRIM_WS
+strconcat TRIM_FIELD '"'
+CMT_CHARS  = '#;'
+VALID_ENDS = '#>$]'
+BAD_STARTS = '%!^'
+HDR_DEV    = '|ホスト名|ホスト|機器名|hostname|host|'
+HDR_CRED   = '|ユーザー名|ユーザ名|username|user|'
+
+; --- 2. 起動設定・踏み台接続 (最小ポップアップ / 既存接続を再利用) ---
+sprintf2 CSV_FILE    '%s\%s' BASE_DIR DEF_CSV_NAME
+sprintf2 CRED_FILE   '%s\%s' BASE_DIR DEF_CRED_NAME
+sprintf2 LOG_DIR     '%s\%s' BASE_DIR DEF_LOG_NAME
+sprintf2 DEFAULT_CMD '%s\%s' BASE_DIR DEF_CMD_NAME
+
+testlink
+ALREADY_CONNECTED = 0
+if result = 2 then
+    ALREADY_CONNECTED = 1
+endif
+
+BASTION_PASS = ''
+if paramcnt >= 2 then
+    LOG_DIR = param2
+    if paramcnt >= 3 then
+        BASTION_PASS = param3
+    endif
+    if paramcnt >= 4 then
+        CSV_FILE = param4
+    endif
+    if paramcnt >= 5 then
+        CRED_FILE = param5
+    endif
+else
+    ; 対話モード: 踏み台未接続時のみ接続情報を入力 (CSV/ログ先は冒頭設定をそのまま使用)
+    if ALREADY_CONNECTED = 0 then
+        inputbox '踏み台ホスト (IP/ホスト名)' '踏み台接続' BASTION_HOST
+        strlen inputstr
+        if result = 0 end
+        BASTION_HOST = inputstr
+        inputbox '踏み台ユーザー名' '踏み台接続' BASTION_USER
+        strlen inputstr
+        if result = 0 end
+        BASTION_USER = inputstr
+        passwordbox '踏み台サーバのSSHパスワードを入力' '踏み台パスワード'
+        BASTION_PASS = inputstr
+        strlen BASTION_PASS
+        if result = 0 end
+    endif
+endif
+
+; パス解決 & LOG_DIR 末尾スラッシュのみ除去 (先頭 '/' や '\\' は保持)
+RESOLVE_VAL = CSV_FILE
+call resolve_path
+CSV_FILE = RESOLVE_VAL
+strlen CRED_FILE
+if result > 0 then
+    RESOLVE_VAL = CRED_FILE
+    call resolve_path
+    CRED_FILE = RESOLVE_VAL
+    fileopen f_chk CRED_FILE 0 1
+    if f_chk = -1 then
+        CRED_FILE = ''
+    else
+        fileclose f_chk
+    endif
+endif
+RESOLVE_VAL = LOG_DIR
+call resolve_path
+LOG_DIR = RESOLVE_VAL
+strlen LOG_DIR
+LD_LEN = result
+if LD_LEN > 1 then
+    strcopy LOG_DIR LD_LEN 1 LD_LAST
+    strcompare LD_LAST '\'
+    LD_IS_SL = result
+    strcompare LD_LAST '/'
+    if LD_IS_SL = 0 || result = 0 then
+        LD_CUT = LD_LEN - 1
+        strcopy LOG_DIR 1 LD_CUT LOG_DIR
+    endif
+endif
+
+; ログフォルダ作成 & 各サマリCSV初期化
+sprintf2 MKDIR_CMD 'cmd /c mkdir "%s"' LOG_DIR
+exec MKDIR_CMD
+mpause 400
+getdate RUN_TS '%Y%m%d_%H%M%S'
+sprintf2 SUMMARY_FILE     '%s\summary_%s.csv'           LOG_DIR RUN_TS
+sprintf2 RESOLVED_FILE    '%s\resolved_accounts_%s.csv' LOG_DIR RUN_TS
+sprintf2 ATTEMPT_LOG_FILE '%s\attempts_%s.csv'          LOG_DIR RUN_TS
+
+INIT_PATH = SUMMARY_FILE
+INIT_HDR  = 'Timestamp,Device,IP,Protocol,FinalPrompt,Status,Detail,LoggedInUser'
+call init_csv_file
+INIT_PATH = RESOLVED_FILE
+INIT_HDR  = 'Device,IP,LoggedInUser,Protocol,Status'
+call init_csv_file
+INIT_PATH = ATTEMPT_LOG_FILE
+INIT_HDR  = 'Timestamp,Device,IP,Attempt,Protocol,User,Password,Result'
+call init_csv_file
+
+; 未接続時のみ踏み台へSSH接続
+if ALREADY_CONNECTED = 0 then
+    sprintf2 CONNECT_STR '%s:%s /ssh /2 /auth=password /user=%s /passwd=%s' BASTION_HOST BASTION_PORT BASTION_USER BASTION_PASS
+    connect CONNECT_STR
+    if result <> 2 then
+        messagebox '踏み台サーバへのSSH接続に失敗しました。' '接続エラー'
+        end
+    endif
+    timeout = 15
+    wait BASTION_PROMPT '#' '$' '%' '>'
+    if result = 0 then
+        messagebox '踏み台プロンプト待機がタイムアウトしました。' '接続エラー'
+        disconnect 0
+        end
+    endif
+endif
+mpause 300
+flushrecv
+
+; --- 3. 機器一覧CSV (device.csv) ループ ---
+TOTAL_COUNT = 0
+OK_COUNT    = 0
+NG_COUNT    = 0
+DEV_NAME    = '(起動中)'
+DEV_IP      = '-'
+DEV_PROTO   = '-'
+DEV_STATUS  = 'NG'
+DEV_DETAIL  = '-'
+F_CRED_OPEN = 0
+IS_LOG_OPEN = 0
+IS_DEVICE_LOGGED_IN = 0
+
+fileopen f_csv CSV_FILE 0 1
+if f_csv = -1 then
+    messagebox '機器一覧CSVを開けませんでした。' 'エラー'
+    if ALREADY_CONNECTED = 0 then
+        sendln 'exit'
+        disconnect 0
+    endif
+    end
+endif
+CSV_EOF = 0
+
+:read_csv_loop
+testlink
+if result <> 2 goto bastion_disconnected
+if CSV_EOF = 1 goto end_csv_loop
+line = ''
+filereadln f_csv line
+if result = 1 then
+    CSV_EOF = 1
+    strlen line
+    if result = 0 goto end_csv_loop
+endif
+
+CL_VAL = line
+call clean_line
+if CL_SKIP = 1 goto read_csv_loop
+line = CL_VAL
+
+; strsplit で7列一括分解 & トリム
+strsplit line ',' 7
+DEV_NAME   = groupmatchstr1
+DEV_IP     = groupmatchstr2
+DEV_USER   = groupmatchstr3
+DEV_PASS   = groupmatchstr4
+DEV_ENPASS = groupmatchstr5
+DEV_PROTO  = groupmatchstr6
+DEV_CMD    = groupmatchstr7
+strtrim DEV_NAME   TRIM_FIELD
+strtrim DEV_IP     TRIM_FIELD
+strtrim DEV_USER   TRIM_FIELD
+strtrim DEV_PASS   TRIM_FIELD
+strtrim DEV_ENPASS TRIM_FIELD
+CMT_VAL = DEV_PROTO
+call strip_comment
+DEV_PROTO = CMT_VAL
+CMT_VAL = DEV_CMD
+call strip_comment
+DEV_CMD = CMT_VAL
+
+; 4列短縮形式 (ホスト名,IP,ssh,commands_xxx.txt) の自動救済
+strlen DEV_ENPASS
+L5 = result
+strlen DEV_PROTO
+L6 = result
+strlen DEV_CMD
+L7 = result
+if L5 = 0 && L6 = 0 && L7 = 0 then
+    NORM_PROTO = DEV_USER
+    call normalize_proto
+    strlen NORM_PROTO
+    if result > 0 then
+        C4_OK = 0
+        strlen DEV_PASS
+        if result = 0 then
+            C4_OK = 1
+        else
+            strscan DEV_PASS '.txt'
+            if result > 0 then
+                C4_OK = 1
+            endif
+        endif
+        if C4_OK = 1 then
+            DEV_PROTO = NORM_PROTO
+            DEV_CMD   = DEV_PASS
+            DEV_USER  = ''
+            DEV_PASS  = ''
+        endif
+    endif
+endif
+
+; ヘッダ行・IP空欄スキップ
+tolower H_NAME DEV_NAME
+sprintf2 H_CHK '|%s|' H_NAME
+strscan HDR_DEV H_CHK
+if result > 0 goto read_csv_loop
+strlen DEV_IP
+if result = 0 goto read_csv_loop
+
+TOTAL_COUNT = TOTAL_COUNT + 1
+strlen DEV_NAME
+if result = 0 then
+    DEV_NAME = DEV_IP
+endif
+
+NORM_PROTO = DEV_PROTO
+call normalize_proto
+ORIG_DEV_PROTO = NORM_PROTO
+strlen ORIG_DEV_PROTO
+if result = 0 then
+    HAS_ORIG_PROTO = 0
+    DEV_PROTO = 'ssh'
+else
+    HAS_ORIG_PROTO = 1
+    DEV_PROTO = ORIG_DEV_PROTO
+endif
+
+strlen DEV_CMD
+if result = 0 then
+    DEV_CMD = DEFAULT_CMD
+else
+    RESOLVE_VAL = DEV_CMD
+    call resolve_path
+    DEV_CMD = RESOLVE_VAL
+endif
+
+; 機器状態初期化
+DEV_STATUS       = 'NG'
+DEV_DETAIL       = 'Unknown'
+LAST_FAIL_DETAIL = ''
+FINAL_PROMPT     = '?'
+PROMPT_SYMBOL    = '?'
+IS_LOG_OPEN      = 0
+IS_DEVICE_LOGGED_IN = 0
+AUTH_ATTEMPT     = 0
+F_CRED_OPEN      = 0
+F_CRED_TRIED     = 0
+PROTO_DUAL_PHASE = 0
+SKIP_RETRY_WAIT  = 0
+SSH_PORT_DEAD    = 0
+TELNET_PORT_DEAD = 0
+SSH_LEGACY_MODE  = 0
+ENABLE_FAILED    = 0
+ACTIVE_USER      = ''
+ACTIVE_PASS      = ''
+ACTIVE_ENPASS    = ''
+
+HAS_DEV_CRED = 0
+strlen DEV_USER
+if result > 0 then
+    HAS_DEV_CRED = 1
+endif
+strlen DEV_PASS
+if result > 0 then
+    HAS_DEV_CRED = 1
+endif
+
+if HAS_DEV_CRED = 1 then
+    ACTIVE_USER   = DEV_USER
+    ACTIVE_PASS   = DEV_PASS
+    ACTIVE_ENPASS = DEV_ENPASS
+    strlen ACTIVE_ENPASS
+    if result = 0 then
+        ACTIVE_ENPASS = ACTIVE_PASS
+    endif
+    if HAS_ORIG_PROTO = 0 then
+        DEV_PROTO = 'ssh'
+        PROTO_DUAL_PHASE = 1
+    else
+        DEV_PROTO = ORIG_DEV_PROTO
+        PROTO_DUAL_PHASE = 0
+    endif
+    AUTH_ATTEMPT = 1
+    goto issue_connect_cmd
+endif
+
+strlen CRED_FILE
+if result > 0 goto open_cred_csv_file
+if FALLBACK_TO_BASTION_CRED = 1 then
+    ACTIVE_USER   = BASTION_USER
+    ACTIVE_PASS   = BASTION_PASS
+    ACTIVE_ENPASS = BASTION_PASS
+    AUTH_ATTEMPT  = 1
+    if HAS_ORIG_PROTO = 0 then
+        DEV_PROTO = 'ssh'
+        PROTO_DUAL_PHASE = 1
+    else
+        DEV_PROTO = ORIG_DEV_PROTO
+        PROTO_DUAL_PHASE = 0
+    endif
+    goto issue_connect_cmd
+endif
+DEV_DETAIL = 'No Credentials (credentials.csv missing)'
+goto record_result
+
+; --- 4. 外部パスワードCSV (credentials.csv) ループ ---
+:open_cred_csv_file
+F_CRED_TRIED = 1
+CRED_EOF = 0
+fileopen f_cred CRED_FILE 0 1
+if f_cred = -1 then
+    strlen LAST_FAIL_DETAIL
+    if AUTH_ATTEMPT > 0 && result > 0 then
+        DEV_DETAIL = LAST_FAIL_DETAIL
+    else
+        DEV_DETAIL = 'Credentials CSV Open Failed'
+    endif
+    goto record_result
+endif
+F_CRED_OPEN = 1
+
+:read_cred_csv_loop
+if CRED_EOF = 1 goto cred_csv_eof
+cred_line = ''
+filereadln f_cred cred_line
+if result = 1 then
+    CRED_EOF = 1
+    strlen cred_line
+    if result = 0 goto cred_csv_eof
+endif
+
+CL_VAL = cred_line
+call clean_line
+if CL_SKIP = 1 goto read_cred_csv_loop
+
+strsplit CL_VAL ',' 4
+C_USER   = groupmatchstr1
+C_PASS   = groupmatchstr2
+C_ENPASS = groupmatchstr3
+C_PROTO  = groupmatchstr4
+strtrim C_USER   TRIM_FIELD
+strtrim C_PASS   TRIM_FIELD
+strtrim C_ENPASS TRIM_FIELD
+CMT_VAL = C_PROTO
+call strip_comment
+C_PROTO = CMT_VAL
+
+tolower H_CU C_USER
+sprintf2 H_CHK '|%s|' H_CU
+strscan HDR_CRED H_CHK
+if result > 0 goto read_cred_csv_loop
+strlen C_USER
+CU_LEN = result
+strlen C_PASS
+CP_LEN = result
+if CU_LEN = 0 && CP_LEN = 0 goto read_cred_csv_loop
+strlen C_ENPASS
+if result = 0 then
+    C_ENPASS = C_PASS
+endif
+
+NORM_PROTO = C_PROTO
+call normalize_proto
+C_PROTO = NORM_PROTO
+strlen C_PROTO
+CP_PLEN = result
+
+if HAS_ORIG_PROTO = 1 then
+    if CP_PLEN > 0 then
+        strcompare C_PROTO ORIG_DEV_PROTO
+        if result <> 0 then
+            ATT_NO    = '-'
+            ATT_PROTO = C_PROTO
+            ATT_USER  = C_USER
+            ATT_PASS  = '-'
+            sprintf2 ATT_RES 'SKIP_PROTO (CSV=%s Need=%s)' C_PROTO ORIG_DEV_PROTO
+            call log_attempt
+            goto read_cred_csv_loop
+        endif
+    endif
+    DEV_PROTO = ORIG_DEV_PROTO
+    PROTO_DUAL_PHASE = 0
+else
+    if CP_PLEN > 0 then
+        strcompare C_PROTO 'ssh'
+        if result = 0 && SSH_PORT_DEAD = 1 goto read_cred_csv_loop
+        strcompare C_PROTO 'telnet'
+        if result = 0 && TELNET_PORT_DEAD = 1 goto read_cred_csv_loop
+        DEV_PROTO = C_PROTO
+        PROTO_DUAL_PHASE = 0
+    elseif SSH_PORT_DEAD = 0 && TELNET_PORT_DEAD = 0 then
+        DEV_PROTO = 'ssh'
+        PROTO_DUAL_PHASE = 1
+    elseif SSH_PORT_DEAD = 0 then
+        DEV_PROTO = 'ssh'
+        PROTO_DUAL_PHASE = 0
+    elseif TELNET_PORT_DEAD = 0 then
+        DEV_PROTO = 'telnet'
+        PROTO_DUAL_PHASE = 0
+    else
+        fileclose f_cred
+        F_CRED_OPEN = 0
+        DEV_DETAIL = 'Connection Refused (SSH & Telnet)'
+        goto record_result
+    endif
+endif
+
+if HAS_DEV_CRED = 1 && HAS_ORIG_PROTO = 1 && AUTH_ATTEMPT = 1 then
+    strcompare C_USER DEV_USER
+    if result = 0 then
+        strcompare C_PASS DEV_PASS
+        if result = 0 goto read_cred_csv_loop
+    endif
+endif
+
+AUTH_ATTEMPT  = AUTH_ATTEMPT + 1
+ACTIVE_USER   = C_USER
+ACTIVE_PASS   = C_PASS
+ACTIVE_ENPASS = C_ENPASS
+goto issue_connect_cmd
+
+:cred_csv_eof
+fileclose f_cred
+F_CRED_OPEN = 0
+if AUTH_ATTEMPT > 1 then
+    sprintf2 DEV_DETAIL 'All %d Auth Attempts Failed (Password CSV exhausted)' AUTH_ATTEMPT
+elseif AUTH_ATTEMPT = 1 then
+    strlen LAST_FAIL_DETAIL
+    if result > 0 then
+        DEV_DETAIL = LAST_FAIL_DETAIL
+    else
+        DEV_DETAIL = 'Auth Failed'
+    endif
+else
+    strlen LAST_FAIL_DETAIL
+    if result > 0 then
+        DEV_DETAIL = LAST_FAIL_DETAIL
+    elseif HAS_ORIG_PROTO = 1 then
+        sprintf2 DEV_DETAIL 'No Matching Credential in CSV (Need: %s)' ORIG_DEV_PROTO
+    else
+        DEV_DETAIL = 'No Matching Credential in CSV'
+    endif
+endif
+goto record_result
+
+; --- 5. 接続コマンド発行 & 2段階ログイン交渉 (SSH / Telnet 完全分離) ---
+:issue_connect_cmd
+if AUTH_ATTEMPT > 1 && SKIP_RETRY_WAIT = 0 then
+    if AUTH_RETRY_INTERVAL > 0 then
+        pause AUTH_RETRY_INTERVAL
+    else
+        mpause 200
+    endif
+endif
+SKIP_RETRY_WAIT = 0
+
+sprintf2 ATT_NO '#%d' AUTH_ATTEMPT
+ATT_PROTO = DEV_PROTO
+ATT_USER  = ACTIVE_USER
+ATT_PASS  = ACTIVE_PASS
+ATT_RES   = 'TRYING'
+call log_attempt
+
+if paramcnt < 3 then
+    sprintf2 T_STR '[#%d %s] %s (%s) %s' AUTH_ATTEMPT DEV_PROTO DEV_NAME DEV_IP ACTIVE_USER
+    settitle T_STR
+    sprintf2 DLG_MSG '機器: %s (%s)%sプロトコル: %s / 試行: #%d%sユーザー: %s%sパスワード: %s' DEV_NAME DEV_IP CRLF DEV_PROTO AUTH_ATTEMPT CRLF ACTIVE_USER CRLF ACTIVE_PASS
+    statusbox DLG_MSG '接続・認証試行中'
+endif
+
+testlink
+if result <> 2 goto bastion_disconnected
+flushrecv
+
+IS_TELNET = 0
+strcompare DEV_PROTO 'telnet'
+if result = 0 then
+    IS_TELNET = 1
+endif
+
+if IS_TELNET = 1 then
+    send 'telnet '
+    send DEV_IP
+    sendln ' ; echo "__BAS""TION_RETURN__"'
+else
+    send 'ssh -o NumberOfPasswordPrompts=1 -o StrictHostKeyChecking=no '
+    send '-o UserKnownHostsFile=/dev/null -o PubkeyAuthentication=no '
+    send '-o PreferredAuthentications=keyboard-interactive,password '
+    if SSH_LEGACY_MODE = 1 then
+        send '-o KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1 '
+        send '-o HostKeyAlgorithms=+ssh-rsa -o Ciphers=+aes128-cbc,3des-cbc,aes192-cbc,aes256-cbc '
+    endif
+    strlen SSH_EXTRA_OPTS
+    if result > 0 then
+        send SSH_EXTRA_OPTS
+        send ' '
+    endif
+    strlen ACTIVE_USER
+    if result > 0 then
+        send ACTIVE_USER
+        send '@'
+    endif
+    send DEV_IP
+    sendln ' ; echo "__BAS""TION_RETURN__"'
+endif
+
+LOGIN_SUCCESS    = 0
+INIT_PROMPT_IDX  = 0
+STAGE1_USER_SENT = 0
+
+:login_stage1_loop
+timeout = LOGIN_TIMEOUT
+if IS_TELNET = 1 goto login_stage1_telnet
+
+; SSH 第1段階 (wait 10引数)
+wait '__BASTION_RETURN__' 'yes/no' 'assword:' 'PASSWORD:' 'Passcode:' 'passphrase' 'no matching' 'no mutual' 'Connection refused' 'パスワード'
+S1 = result
+if S1 = 1 then
+    mpause 200
+    flushrecv
+    if PROTO_DUAL_PHASE = 1 then
+        SKIP_RETRY_WAIT = 1
+    endif
+    LAST_FAIL_DETAIL = 'SSH Closed Before Password Prompt'
+    goto check_next_credential
+elseif S1 = 2 then
+    sendln 'yes'
+    goto login_stage1_loop
+elseif S1 = 3 || S1 = 4 || S1 = 5 || S1 = 10 then
+    sendln ACTIVE_PASS
+    goto login_stage2_wait
+elseif S1 = 6 then
+    call abort_to_bastion
+    LAST_FAIL_DETAIL = 'SSH Key Passphrase Prompted'
+    goto check_next_credential
+elseif S1 = 7 || S1 = 8 then
+    call wait_bastion_or_abort
+    if SSH_LEGACY_MODE = 0 then
+        SSH_LEGACY_MODE = 1
+        SKIP_RETRY_WAIT = 1
+        sprintf2 ATT_NO '#%d' AUTH_ATTEMPT
+        ATT_PROTO = DEV_PROTO
+        ATT_USER  = ACTIVE_USER
+        ATT_PASS  = '-'
+        ATT_RES   = 'RETRY_LEGACY_SSH (Algorithm Mismatch)'
+        call log_attempt
+        goto issue_connect_cmd
+    endif
+    SSH_PORT_DEAD = 1
+    LAST_FAIL_DETAIL = 'SSH Algorithm Mismatch (Check SSH_EXTRA_OPTS)'
+    if PROTO_DUAL_PHASE = 1 || (HAS_ORIG_PROTO = 0 && F_CRED_OPEN = 1) then
+        SKIP_RETRY_WAIT = 1
+        goto check_next_credential
+    endif
+    DEV_DETAIL = LAST_FAIL_DETAIL
+    goto record_result
+elseif S1 = 9 then
+    call wait_bastion_or_abort
+    SSH_PORT_DEAD = 1
+    goto on_port_refused
+endif
+call abort_to_bastion
+LAST_FAIL_DETAIL = 'SSH Login Timeout (No Password Prompt)'
+goto check_next_credential
+
+; Telnet 第1段階 (wait 10引数)
+:login_stage1_telnet
+wait '__BASTION_RETURN__' 'login:' 'Login:' 'Username:' 'User:' 'assword:' 'PASSWORD:' 'Connection refused' 'refused' 'パスワード'
+S1 = result
+if S1 = 1 then
+    mpause 200
+    flushrecv
+    LAST_FAIL_DETAIL = 'Telnet Not Accepted / Closed by Host'
+    goto on_telnet_dead
+elseif S1 >= 2 && S1 <= 5 then
+    STAGE1_USER_SENT = STAGE1_USER_SENT + 1
+    if STAGE1_USER_SENT >= 2 then
+        mpause 200
+        flushrecv
+        call abort_to_bastion
+        LAST_FAIL_DETAIL = 'Auth Failed (Username Rejected)'
+        goto check_next_credential
+    endif
+    sendln ACTIVE_USER
+    goto login_stage1_loop
+elseif S1 = 6 || S1 = 7 || S1 = 10 then
+    sendln ACTIVE_PASS
+    goto login_stage2_wait
+elseif S1 = 8 || S1 = 9 then
+    call wait_bastion_or_abort
+    TELNET_PORT_DEAD = 1
+    goto on_port_refused
+endif
+
+; Telnet 第1段階タイムアウト: Enter 1回確認 -> 無応答ならTelnet非対応確定
+sendln ''
+timeout = 5
+wait '__BASTION_RETURN__' 'assword:' 'login:' 'Login:' 'Username:' 'invalid' '>' '#' '$' ']'
+if result = 1 then
+    if STAGE1_USER_SENT = 0 then
+        LAST_FAIL_DETAIL = 'Telnet Not Accepted / Closed'
+        goto on_telnet_dead
+    endif
+    LAST_FAIL_DETAIL = 'Connection Timed Out / Closed'
+    goto check_next_credential
+elseif result = 2 then
+    sendln ACTIVE_PASS
+    goto login_stage2_wait
+elseif result >= 3 && result <= 5 then
+    if STAGE1_USER_SENT = 0 then
+        STAGE1_USER_SENT = 1
+        sendln ACTIVE_USER
+        goto login_stage1_loop
+    endif
+    call abort_to_bastion
+    LAST_FAIL_DETAIL = 'Auth Failed (Login Prompt)'
+    goto check_next_credential
+elseif result = 6 then
+    call abort_to_bastion
+    LAST_FAIL_DETAIL = 'Auth Failed (Invalid)'
+    goto check_next_credential
+elseif result >= 7 && result <= 10 then
+    RES_P = result
+    call set_init_prompt
+    goto login_success_exit
+endif
+call abort_to_bastion
+if STAGE1_USER_SENT = 0 then
+    LAST_FAIL_DETAIL = 'Telnet Not Accepted (Timeout)'
+    goto on_telnet_dead
+endif
+LAST_FAIL_DETAIL = 'Login Timeout'
+goto check_next_credential
+
+:on_port_refused
+LAST_FAIL_DETAIL = 'Connection Refused / Unreachable'
+if HAS_ORIG_PROTO = 0 then
+    if SSH_PORT_DEAD = 1 && TELNET_PORT_DEAD = 1 then
+        DEV_DETAIL = 'Connection Refused (SSH & Telnet)'
+        goto record_result
+    endif
+    SKIP_RETRY_WAIT = 1
+    goto check_next_credential
+endif
+DEV_DETAIL = LAST_FAIL_DETAIL
+goto record_result
+
+:on_telnet_dead
+TELNET_PORT_DEAD = 1
+if HAS_ORIG_PROTO = 1 || SSH_PORT_DEAD = 1 then
+    DEV_DETAIL = LAST_FAIL_DETAIL
+    goto record_result
+endif
+goto check_next_credential
+
+; 【第2段階】パスワード送信後 (タイムアウト時は1回だけEnter再確認を共通処理)
+:login_stage2_wait
+S2_RETRY = 0
+timeout = LOGIN_TIMEOUT
+:login_stage2_exec
+if IS_TELNET = 1 then
+    wait '__BASTION_RETURN__' 'assword:' 'Login invalid' 'Authentication fail' 'incorrect' 'Username:' '>' '#' '$' ']'
+else
+    wait '__BASTION_RETURN__' 'assword:' 'Permission denied' 'Authentication fail' 'Access denied' 'incorrect' '>' '#' '$' ']'
+endif
+S2 = result
+if S2 = 1 then
+    mpause 200
+    flushrecv
+    LAST_FAIL_DETAIL = 'Auth Rejected / Closed by Host'
+    goto check_next_credential
+elseif S2 >= 2 && S2 <= 6 then
+    if IS_TELNET = 1 then
+        mpause 300
+        flushrecv
+    endif
+    call abort_to_bastion
+    LAST_FAIL_DETAIL = 'Auth Failed (Wrong Password)'
+    goto check_next_credential
+elseif S2 >= 7 && S2 <= 10 then
+    RES_P = S2
+    call set_init_prompt
+    goto login_success_exit
+elseif S2_RETRY = 0 then
+    S2_RETRY = 1
+    sendln ''
+    timeout = 5
+    goto login_stage2_exec
+endif
+call abort_to_bastion
+LAST_FAIL_DETAIL = 'Post-Auth Timeout'
+goto check_next_credential
+
+; 認証失敗時の次候補遷移
+:check_next_credential
+sprintf2 ATT_NO '#%d' AUTH_ATTEMPT
+ATT_PROTO = DEV_PROTO
+ATT_USER  = ACTIVE_USER
+ATT_PASS  = '-'
+sprintf2 ATT_RES 'FAIL (%s)' LAST_FAIL_DETAIL
+call log_attempt
+
+if PROTO_DUAL_PHASE = 1 then
+    PROTO_DUAL_PHASE = 2
+    if TELNET_PORT_DEAD = 0 then
+        DEV_PROTO = 'telnet'
+        AUTH_ATTEMPT = AUTH_ATTEMPT + 1
+        SKIP_RETRY_WAIT = 1
+        goto issue_connect_cmd
+    endif
+endif
+PROTO_DUAL_PHASE = 0
+
+if F_CRED_OPEN = 1 goto read_cred_csv_loop
+strlen CRED_FILE
+if result > 0 && F_CRED_TRIED = 0 && (HAS_DEV_CRED = 0 || FALLBACK_TO_CRED_FILE = 1) goto open_cred_csv_file
+
+if AUTH_ATTEMPT > 1 then
+    sprintf2 DEV_DETAIL 'All %d Auth Attempts Failed' AUTH_ATTEMPT
+else
+    strlen LAST_FAIL_DETAIL
+    if result > 0 then
+        DEV_DETAIL = LAST_FAIL_DETAIL
+    else
+        DEV_DETAIL = 'Auth Failed'
+    endif
+endif
+goto record_result
+
+; --- 6. 特権昇格・ページング解除・プロンプト取得 (マルチベンダー) ---
+:login_success_exit
+if F_CRED_OPEN = 1 then
+    fileclose f_cred
+    F_CRED_OPEN = 0
+endif
+DEV_USER = ACTIVE_USER
+DEV_PASS = ACTIVE_PASS
+strlen ACTIVE_ENPASS
+if result > 0 then
+    DEV_ENPASS = ACTIVE_ENPASS
+else
+    strlen DEV_ENPASS
+    if result = 0 then
+        DEV_ENPASS = ACTIVE_PASS
+    endif
+endif
+mpause 400
+flushrecv
+
+if INIT_PROMPT_IDX >= 2 goto disable_paging
+sendln 'enable'
+timeout = 5
+wait '__BASTION_RETURN__' 'assword:' '#' ']' 'Invalid' 'Unknown' 'not found' 'Error' 'syntax' '>'
+if result = 1 then
+    IS_DEVICE_LOGGED_IN = 0
+    DEV_DETAIL = 'Disconnected During Enable'
+    goto cleanup_done
+elseif result = 2 then
+    sendln DEV_ENPASS
+    timeout = 5
+    wait '__BASTION_RETURN__' '#' ']' '>' 'assword:' 'denied' 'Bad' 'Invalid' 'failed'
+    if result = 1 then
+        IS_DEVICE_LOGGED_IN = 0
+        DEV_DETAIL = 'Disconnected During Enable Password'
+        goto cleanup_done
+    elseif result >= 5 && result <= 9 then
+        ENABLE_FAILED = 1
+        if result = 5 then
+            call cancel_en_pw
+            if EN_DROPPED = 1 goto cleanup_done
+        endif
+    endif
+elseif result >= 5 && result <= 9 then
+    mpause 200
+    flushrecv
+    sendln 'administrator'
+    timeout = 5
+    wait '__BASTION_RETURN__' 'assword:' '#' '>' '$'
+    if result = 1 then
+        IS_DEVICE_LOGGED_IN = 0
+        DEV_DETAIL = 'Disconnected During Administrator Cmd'
+        goto cleanup_done
+    elseif result = 2 then
+        sendln DEV_ENPASS
+        timeout = 5
+        wait '__BASTION_RETURN__' '#' '>' '$' 'assword:' 'Error'
+        if result = 1 then
+            IS_DEVICE_LOGGED_IN = 0
+            DEV_DETAIL = 'Disconnected During Administrator Password'
+            goto cleanup_done
+        elseif result = 5 || result = 6 then
+            ENABLE_FAILED = 1
+            if result = 5 then
+                call cancel_en_pw
+                if EN_DROPPED = 1 goto cleanup_done
+            endif
+        endif
+    endif
+endif
+
+:disable_paging
+if INIT_PROMPT_IDX = 3 goto detect_final_prompt
+PAGING_DONE = 0
+PAGING_CMD = 'terminal length 0'
+call send_paging_cmd
+if PAGING_DONE = 1 goto detect_final_prompt
+if PAGING_DONE = 2 goto cleanup_done
+PAGING_CMD = 'set cli screen-length 0'
+call send_paging_cmd
+if PAGING_DONE = 1 goto detect_final_prompt
+if PAGING_DONE = 2 goto cleanup_done
+PAGING_CMD = 'screen-length 0 temporary'
+call send_paging_cmd
+if PAGING_DONE = 1 goto detect_final_prompt
+if PAGING_DONE = 2 goto cleanup_done
+sendln 'console lines infinity'
+timeout = 3
+wait '__BASTION_RETURN__' '#' '>' '$' ']'
+if result = 1 then
+    IS_DEVICE_LOGGED_IN = 0
+    DEV_DETAIL = 'Disconnected During Paging Disable'
+    goto cleanup_done
+endif
+
+:detect_final_prompt
+mpause 500
+flushrecv
+sendln ''
+mpause 400
+sendln ''
+timeout = 3
+waitln '#' '>' '$' ']'
+WL_RES = result
+PROMPT_VALID = 0
+if WL_RES >= 1 && WL_RES <= 4 then
+    CAND_PROMPT = inputstr
+    strtrim CAND_PROMPT TRIM_WS
+    strlen CAND_PROMPT
+    P_LEN = result
+    if P_LEN >= 1 && P_LEN <= 40 then
+        strcopy CAND_PROMPT 1 1 P_FIRST
+        strcopy CAND_PROMPT P_LEN 1 P_LAST
+        strscan VALID_ENDS P_LAST
+        P_END_OK = result
+        strscan BAD_STARTS P_FIRST
+        P_BAD = result
+        if P_END_OK > 0 && P_BAD = 0 then
+            PROMPT_SYMBOL = P_LAST
+            FINAL_PROMPT  = CAND_PROMPT
+            PROMPT_VALID  = 1
+        endif
+    endif
+endif
+if PROMPT_VALID = 0 then
+    if INIT_PROMPT_IDX = 1 then
+        PROMPT_SYMBOL = '>'
+    elseif INIT_PROMPT_IDX = 3 then
+        PROMPT_SYMBOL = '$'
+    elseif INIT_PROMPT_IDX = 5 then
+        PROMPT_SYMBOL = ']'
+    else
+        PROMPT_SYMBOL = '#'
+    endif
+    FINAL_PROMPT = PROMPT_SYMBOL
+endif
+mpause 300
+flushrecv
+
+; --- 7. ログ取得・コマンド実行・切断・結果記録 ---
+sprintf2 LOG_FILE '%s\%s_%s.log' LOG_DIR DEV_NAME RUN_TS
+logclose
+logopen LOG_FILE 0 0
+IS_LOG_OPEN = 1
+sprintf2 LOG_HDR '%s==================================================%s# Host: %s (%s) / Protocol: %s / Logged-in User: %s%s==================================================%s' CRLF CRLF DEV_NAME DEV_IP DEV_PROTO DEV_USER CRLF CRLF
+logwrite LOG_HDR
+
+fileopen f_cmd DEV_CMD 0 1
+if f_cmd = -1 then
+    DEV_DETAIL = 'Command File Not Found'
+    goto cleanup_device
+endif
+CMD_EOF = 0
+
+:read_cmd_loop
+if CMD_EOF = 1 goto end_cmd_loop
+cmd_line = ''
+filereadln f_cmd cmd_line
+if result = 1 then
+    CMD_EOF = 1
+    strlen cmd_line
+    if result = 0 goto end_cmd_loop
+endif
+CL_VAL = cmd_line
+call clean_line
+if CL_SKIP = 1 goto read_cmd_loop
+cmd_line = CL_VAL
+
+sprintf2 CMD_HDR '%s==================== [ %s ] ====================%s' CRLF cmd_line CRLF
+logwrite CMD_HDR
+testlink
+if result <> 2 goto bastion_disconnected
+sendln cmd_line
+
+:wait_cmd_prompt
+timeout = CMD_TIMEOUT
+wait FINAL_PROMPT '--More--' '-- More --' '---(more' 'More:' '続く' 'RETURN' 'any key' '__BASTION_RETURN__'
+if result = 1 goto read_cmd_loop
+if result >= 2 && result <= 6 then
+    send ' '
+    goto wait_cmd_prompt
+elseif result >= 7 && result <= 8 then
+    sendln ''
+    goto wait_cmd_prompt
+elseif result = 9 then
+    fileclose f_cmd
+    IS_DEVICE_LOGGED_IN = 0
+    DEV_DETAIL = 'Disconnected During Command'
+    goto cleanup_done
+endif
+sendln ''
+timeout = 3
+wait FINAL_PROMPT PROMPT_SYMBOL '__BASTION_RETURN__'
+if result = 3 then
+    fileclose f_cmd
+    IS_DEVICE_LOGGED_IN = 0
+    DEV_DETAIL = 'Disconnected During Command'
+    goto cleanup_done
+endif
+goto read_cmd_loop
+
+:end_cmd_loop
+fileclose f_cmd
+DEV_STATUS = 'OK'
+if ENABLE_FAILED = 1 then
+    DEV_DETAIL = 'Success (Enable Failed - User Mode)'
+elseif AUTH_ATTEMPT > 1 then
+    sprintf2 DEV_DETAIL 'Success (Candidate #%d matched)' AUTH_ATTEMPT
+else
+    DEV_DETAIL = 'Success'
+endif
+
+:cleanup_device
+if IS_LOG_OPEN = 1 then
+    logclose
+    IS_LOG_OPEN = 0
+endif
+if IS_DEVICE_LOGGED_IN = 1 then
+    testlink
+    if result <> 2 goto bastion_disconnected
+    mpause 300
+    flushrecv
+    sendln 'exit'
+    timeout = 7
+    wait '__BASTION_RETURN__' 'Save new configuration ? (y/n)' 'Save? [yes/no]' '(y/n)' '[y/n]'
+    if result = 1 goto cleanup_done
+    if result >= 2 && result <= 5 then
+        sendln 'n'
+        timeout = 7
+        wait '__BASTION_RETURN__'
+        if result = 1 goto cleanup_done
+    endif
+    sendln 'quit'
+    timeout = 5
+    wait '__BASTION_RETURN__'
+    if result = 1 goto cleanup_done
+    if IS_TELNET = 0 then
+        sendln ''
+        mpause 200
+        send '~.'
+        timeout = 3
+        wait '__BASTION_RETURN__'
+        if result = 1 then
+            send #3
+            mpause 150
+            goto cleanup_done
+        endif
+    endif
+    call abort_to_bastion
+endif
+
+:cleanup_done
+IS_DEVICE_LOGGED_IN = 0
+if F_CRED_OPEN = 1 then
+    fileclose f_cred
+    F_CRED_OPEN = 0
+endif
+mpause 200
+flushrecv
+if IS_LOG_OPEN = 1 then
+    logclose
+    IS_LOG_OPEN = 0
+endif
+
+:record_result
+if F_CRED_OPEN = 1 then
+    fileclose f_cred
+    F_CRED_OPEN = 0
+endif
+strcompare DEV_STATUS 'OK'
+if result = 0 then
+    OK_COUNT = OK_COUNT + 1
+    fileopen f_res RESOLVED_FILE 1
+    if f_res <> -1 then
+        sprintf2 RES_LINE '%s,%s,%s,%s,%s' DEV_NAME DEV_IP DEV_USER DEV_PROTO DEV_STATUS
+        filewriteln f_res RES_LINE
+        fileclose f_res
+    endif
+else
+    NG_COUNT = NG_COUNT + 1
+    DEV_USER = '-'
+endif
+getdate TS '%Y/%m/%d %H:%M:%S'
+fileopen f_sum SUMMARY_FILE 1
+if f_sum <> -1 then
+    sprintf2 SUM_LINE '%s,%s,%s,%s,%s,%s,%s,%s' TS DEV_NAME DEV_IP DEV_PROTO PROMPT_SYMBOL DEV_STATUS DEV_DETAIL DEV_USER
+    filewriteln f_sum SUM_LINE
+    fileclose f_sum
+endif
+sprintf2 ATT_NO '#%d' AUTH_ATTEMPT
+ATT_PROTO = DEV_PROTO
+ATT_USER  = DEV_USER
+ATT_PASS  = '-'
+sprintf2 ATT_RES '%s (%s)' DEV_STATUS DEV_DETAIL
+call log_attempt
+if DEVICE_INTERVAL > 0 then
+    pause DEVICE_INTERVAL
+else
+    mpause 300
+endif
+goto read_csv_loop
+
+; --- 8. 終了・切断ハンドラ ---
+:end_csv_loop
+if F_CRED_OPEN = 1 then
+    fileclose f_cred
+endif
+fileclose f_csv
+if paramcnt < 3 then
+    closesbox
+    settitle 'ログ自動収集 - 完了'
+endif
+if ALREADY_CONNECTED = 0 then
+    testlink
+    if result = 2 then
+        sendln 'exit'
+        mpause 500
+    endif
+    disconnect 0
+endif
+sprintf2 END_MSG '全機器の処理が完了しました。%s対象: %d台 (OK: %d / NG: %d)%s保存先: %s' CRLF TOTAL_COUNT OK_COUNT NG_COUNT CRLF LOG_DIR
+messagebox END_MSG '完了'
+end
+
+:bastion_disconnected
+if IS_LOG_OPEN = 1 then
+    logclose
+endif
+if F_CRED_OPEN = 1 then
+    fileclose f_cred
+endif
+fileclose f_csv
+if paramcnt < 3 then
+    closesbox
+endif
+sprintf2 ERR_MSG '踏み台サーバとの通信が切断されました。%s中断時の対象: %s (%s)%s途中までのログは保存されています。' CRLF DEV_NAME DEV_IP CRLF
+messagebox ERR_MSG '踏み台切断エラー'
+end
+
+; --- 9. 共通サブルーチン ---
+:init_csv_file
+    fileopen f_init INIT_PATH 0
+    if f_init <> -1 then
+        filewriteln f_init INIT_HDR
+        fileclose f_init
+    endif
+return
+
+:clean_line
+    CL_SKIP = 0
+    strlen CL_VAL
+    if result >= 3 then
+        strcopy CL_VAL 1 3 B3
+        strcompare B3 #239#187#191
+        if result = 0 then
+            strlen CL_VAL
+            B_REM = result - 3
+            if B_REM > 0 then
+                strcopy CL_VAL 4 B_REM CL_VAL
+            else
+                CL_VAL = ''
+            endif
+        endif
+    endif
+    strtrim CL_VAL TRIM_WS
+    strlen CL_VAL
+    if result = 0 then
+        CL_SKIP = 1
+        return
+    endif
+    strcopy CL_VAL 1 1 CL_FC
+    strscan CMT_CHARS CL_FC
+    if result > 0 then
+        CL_SKIP = 1
+    endif
+return
+
+:strip_comment
+    strsplit CMT_VAL ',' 2
+    CMT_VAL = groupmatchstr1
+    strsplit CMT_VAL '#' 2
+    CMT_VAL = groupmatchstr1
+    strsplit CMT_VAL ';' 2
+    CMT_VAL = groupmatchstr1
+    strtrim CMT_VAL TRIM_FIELD
+return
+
+:resolve_path
+    strscan RESOLVE_VAL '\'
+    if result = 0 then
+        strscan RESOLVE_VAL '/'
+        if result = 0 then
+            strscan RESOLVE_VAL ':'
+            if result = 0 then
+                sprintf2 RESOLVE_VAL '%s\%s' BASE_DIR RESOLVE_VAL
+            endif
+        endif
+    endif
+return
+
+:normalize_proto
+    tolower NP_LOW NORM_PROTO
+    NP_SSH = 0
+    NP_TEL = 0
+    strscan NP_LOW 'ssh'
+    if result > 0 then
+        NP_SSH = 1
+    endif
+    strcompare NP_LOW '22'
+    if result = 0 then
+        NP_SSH = 1
+    endif
+    strscan NP_LOW 'telnet'
+    if result > 0 then
+        NP_TEL = 1
+    endif
+    strcompare NP_LOW '23'
+    if result = 0 then
+        NP_TEL = 1
+    endif
+    if NP_SSH = 1 && NP_TEL = 0 then
+        NORM_PROTO = 'ssh'
+    elseif NP_TEL = 1 && NP_SSH = 0 then
+        NORM_PROTO = 'telnet'
+    else
+        NORM_PROTO = ''
+    endif
+return
+
+:set_init_prompt
+    LOGIN_SUCCESS = 1
+    IS_DEVICE_LOGGED_IN = 1
+    if RES_P = 7 then
+        INIT_PROMPT_IDX = 1
+    elseif RES_P = 8 then
+        INIT_PROMPT_IDX = 2
+    elseif RES_P = 9 then
+        INIT_PROMPT_IDX = 3
+    else
+        INIT_PROMPT_IDX = 5
+    endif
+return
+
+:wait_bastion_or_abort
+    timeout = 5
+    wait '__BASTION_RETURN__'
+    if result = 0 then
+        call abort_to_bastion
+    else
+        mpause 150
+        flushrecv
+    endif
+return
+
+:cancel_en_pw
+    EN_DROPPED = 0
+    send #3
+    mpause 300
+    sendln ''
+    timeout = 3
+    wait '__BASTION_RETURN__' '>' '#'
+    if result = 1 then
+        IS_DEVICE_LOGGED_IN = 0
+        DEV_DETAIL = 'Disconnected During Enable Password'
+        EN_DROPPED = 1
+    endif
+return
+
+:send_paging_cmd
+    testlink
+    if result <> 2 goto bastion_disconnected
+    sendln PAGING_CMD
+    timeout = 3
+    wait '__BASTION_RETURN__' 'Invalid' 'Unknown' 'Error' 'syntax' '#' '>' '$' ']'
+    if result = 1 then
+        IS_DEVICE_LOGGED_IN = 0
+        DEV_DETAIL = 'Disconnected During Paging Disable'
+        PAGING_DONE = 2
+    elseif result >= 6 && result <= 9 then
+        PAGING_DONE = 1
+    elseif result >= 2 && result <= 5 then
+        wait '__BASTION_RETURN__' '#' '>' '$' ']'
+        if result = 1 then
+            IS_DEVICE_LOGGED_IN = 0
+            DEV_DETAIL = 'Disconnected During Paging Disable'
+            PAGING_DONE = 2
+        endif
+    endif
+return
+
+:abort_to_bastion
+    if IS_TELNET = 0 then
+        timeout = 3
+        wait '__BASTION_RETURN__'
+        if result = 1 then
+            mpause 100
+            flushrecv
+            return
+        endif
+        send #3
+        mpause 300
+        timeout = 2
+        wait '__BASTION_RETURN__'
+        if result = 1 then
+            mpause 150
+            flushrecv
+            return
+        endif
+    else
+        flushrecv
+        send #29
+        timeout = 2
+        wait 'telnet>' '__BASTION_RETURN__'
+        if result = 1 then
+            sendln 'quit'
+            timeout = 3
+            wait '__BASTION_RETURN__'
+            if result = 1 then
+                mpause 200
+                flushrecv
+                return
+            endif
+        elseif result = 2 then
+            mpause 200
+            flushrecv
+            return
+        endif
+        send #3
+        mpause 300
+        timeout = 2
+        wait '__BASTION_RETURN__'
+        if result = 1 then
+            mpause 200
+            flushrecv
+            return
+        endif
+    endif
+    testlink
+    if result <> 2 goto bastion_disconnected
+    flushrecv
+    sendln 'echo "__BAS""TION_SYNC__"'
+    timeout = 3
+    wait '__BASTION_SYNC__'
+    mpause 200
+    flushrecv
+return
+
+:log_attempt
+    getdate ATT_TS '%Y/%m/%d %H:%M:%S'
+    fileopen f_att ATTEMPT_LOG_FILE 1
+    if f_att <> -1 then
+        sprintf2 ATT_LINE '%s,%s,%s,%s,%s,%s,%s,%s' ATT_TS DEV_NAME DEV_IP ATT_NO ATT_PROTO ATT_USER ATT_PASS ATT_RES
+        filewriteln f_att ATT_LINE
+        fileclose f_att
+    endif
+return
