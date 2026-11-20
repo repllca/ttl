@@ -47,6 +47,7 @@ class TTLEngine:
         self.labels = {}
         self.call_stack = []
         self.if_stack = []
+        self.include_stack = []
         self.open_files = {}
         self.next_fd = 1
         self.active_log = None
@@ -60,6 +61,7 @@ class TTLEngine:
             lines = f.readlines()
 
         self.instructions = []
+        self.labels = {}
         for line_num, raw in enumerate(lines, start=1):
             code = strip_ttl_comment(raw)
             self.instructions.append((line_num, code))
@@ -95,7 +97,11 @@ class TTLEngine:
         # Initial buffer from mock session
         self.stream_buffer += self.mock_session.initial_bastion_prompt()
 
-        while self.pc < len(self.instructions) and step_count < self.max_steps:
+        while step_count < self.max_steps:
+            while self.pc >= len(self.instructions) and self.include_stack:
+                self.instructions, self.labels, self.pc, self.call_stack, self.if_stack = self.include_stack.pop()
+            if self.pc >= len(self.instructions):
+                break
             step_count += 1
             line_num, code = self.instructions[self.pc]
             if not code or code.startswith(":"):
@@ -517,8 +523,33 @@ class TTLEngine:
             self.pc += 1
             return
 
-        # 27. end
+        # 26b. include <filepath> (Tera Term 4.66+ / 5.x, max depth 9, file-local labels)
+        if cmd == "include":
+            if len(self.include_stack) >= 9:
+                raise RuntimeError("TTL include nesting exceeds maximum depth of 9")
+            inc_raw = str(self._eval_expr(code[len(cmd):].strip()))
+            inc_clean = os.path.normpath(inc_raw.replace("\\", os.sep).replace("/", os.sep))
+            inc_path = os.path.join(self.workspace_dir, inc_clean) if not os.path.isabs(inc_clean) else inc_clean
+            if not os.path.exists(inc_path):
+                raise FileNotFoundError(f"Line {line_num}: include file not found: {inc_path}")
+            self.include_stack.append((self.instructions, self.labels, self.pc + 1, self.call_stack, self.if_stack))
+            self.call_stack = []
+            self.if_stack = []
+            self.load_script(inc_path)
+            self.pc = 0
+            return
+
+        # 26c. exit (returns from included file, or terminates main script)
+        if cmd == "exit":
+            if self.include_stack:
+                self.instructions, self.labels, self.pc, self.call_stack, self.if_stack = self.include_stack.pop()
+            else:
+                self.pc = len(self.instructions)
+            return
+
+        # 27. end (terminates entire macro even inside included file)
         if cmd == "end":
+            self.include_stack = []
             self.pc = len(self.instructions)
             return
 
@@ -527,16 +558,27 @@ class TTLEngine:
     def _handle_if(self, code):
         # Support:
         # if <cond> goto <label>
+        # if <cond> exit / end
         # if <cond> then
         # if <cond> <statement>
         m_then = re.match(r"^if\s+(.*?)\s+then$", code, re.IGNORECASE)
         m_goto = re.match(r"^if\s+(.*?)\s+goto\s+([a-zA-Z0-9_]+)$", code, re.IGNORECASE)
+        m_exit = re.match(r"^if\s+(.*?)\s+(exit|end)$", code, re.IGNORECASE)
 
         if m_goto:
             cond_str = m_goto.group(1)
             target = m_goto.group(2)
             if self._eval_condition(cond_str):
                 self.pc = self.labels[target]
+            else:
+                self.pc += 1
+            return
+
+        if m_exit:
+            cond_str = m_exit.group(1)
+            kw = m_exit.group(2).lower()
+            if self._eval_condition(cond_str):
+                self._execute_line(0, kw)
             else:
                 self.pc += 1
             return

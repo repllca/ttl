@@ -1,0 +1,139 @@
+; ==============================================================================
+; lib\init.ttl : 起動パラメータ処理・パス解決・ログCSV初期化・踏み台SSH接続
+; ==============================================================================
+
+sprintf2 CSV_FILE    '%s\%s' BASE_DIR DEF_CSV_NAME
+sprintf2 CRED_FILE   '%s\%s' BASE_DIR DEF_CRED_NAME
+sprintf2 LOG_DIR     '%s\%s' BASE_DIR DEF_LOG_NAME
+sprintf2 DEFAULT_CMD '%s\%s' BASE_DIR DEF_CMD_NAME
+
+testlink
+ALREADY_CONNECTED = 0
+if result = 2 then
+    ALREADY_CONNECTED = 1
+endif
+
+BASTION_PASS = ''
+if paramcnt >= 2 then
+    LOG_DIR = param2
+    if paramcnt >= 3 then
+        BASTION_PASS = param3
+    endif
+    if paramcnt >= 4 then
+        CSV_FILE = param4
+    endif
+    if paramcnt >= 5 then
+        CRED_FILE = param5
+    endif
+else
+    ; 対話モード: 踏み台未接続時のみ接続情報を入力 (接続済みならポップアップなし即実行)
+    if ALREADY_CONNECTED = 0 then
+        inputbox '踏み台ホスト (IP/ホスト名)' '踏み台接続' BASTION_HOST
+        strlen inputstr
+        if result = 0 end
+        BASTION_HOST = inputstr
+        inputbox '踏み台ユーザー名' '踏み台接続' BASTION_USER
+        strlen inputstr
+        if result = 0 end
+        BASTION_USER = inputstr
+        passwordbox '踏み台サーバのSSHパスワードを入力' '踏み台パスワード'
+        BASTION_PASS = inputstr
+        strlen BASTION_PASS
+        if result = 0 end
+    endif
+endif
+
+; 相対パス解決 & LOG_DIR 末尾スラッシュのみ除去 (先頭 '/' や '\\' は保持)
+RESOLVE_VAL = CSV_FILE
+call init_resolve_path
+CSV_FILE = RESOLVE_VAL
+
+strlen CRED_FILE
+if result > 0 then
+    RESOLVE_VAL = CRED_FILE
+    call init_resolve_path
+    CRED_FILE = RESOLVE_VAL
+    fileopen f_chk CRED_FILE 0 1
+    if f_chk = -1 then
+        CRED_FILE = ''
+    else
+        fileclose f_chk
+    endif
+endif
+
+RESOLVE_VAL = LOG_DIR
+call init_resolve_path
+LOG_DIR = RESOLVE_VAL
+strlen LOG_DIR
+LD_LEN = result
+if LD_LEN > 1 then
+    strcopy LOG_DIR LD_LEN 1 LD_LAST
+    strcompare LD_LAST '\'
+    LD_IS_SL = result
+    strcompare LD_LAST '/'
+    if LD_IS_SL = 0 || result = 0 then
+        LD_CUT = LD_LEN - 1
+        strcopy LOG_DIR 1 LD_CUT LOG_DIR
+    endif
+endif
+
+; ログフォルダ作成 & 各種サマリCSV初期化
+sprintf2 MKDIR_CMD 'cmd /c mkdir "%s"' LOG_DIR
+exec MKDIR_CMD
+mpause 400
+getdate RUN_TS '%Y%m%d_%H%M%S'
+sprintf2 SUMMARY_FILE     '%s\summary_%s.csv'           LOG_DIR RUN_TS
+sprintf2 RESOLVED_FILE    '%s\resolved_accounts_%s.csv' LOG_DIR RUN_TS
+sprintf2 ATTEMPT_LOG_FILE '%s\attempts_%s.csv'          LOG_DIR RUN_TS
+
+INIT_PATH = SUMMARY_FILE
+INIT_HDR  = 'Timestamp,Device,IP,Protocol,FinalPrompt,Status,Detail,LoggedInUser'
+call init_write_hdr
+INIT_PATH = RESOLVED_FILE
+INIT_HDR  = 'Device,IP,LoggedInUser,Protocol,Status'
+call init_write_hdr
+INIT_PATH = ATTEMPT_LOG_FILE
+INIT_HDR  = 'Timestamp,Device,IP,Attempt,Protocol,User,Password,Result'
+call init_write_hdr
+
+; 未接続時のみ踏み台へSSH接続
+if ALREADY_CONNECTED = 0 then
+    sprintf2 CONNECT_STR '%s:%s /ssh /2 /auth=password /user=%s /passwd=%s' BASTION_HOST BASTION_PORT BASTION_USER BASTION_PASS
+    connect CONNECT_STR
+    if result <> 2 then
+        messagebox '踏み台サーバへのSSH接続に失敗しました。' '接続エラー'
+        end
+    endif
+    timeout = 15
+    wait BASTION_PROMPT '#' '$' '%' '>'
+    if result = 0 then
+        messagebox '踏み台プロンプト待機がタイムアウトしました。' '接続エラー'
+        disconnect 0
+        end
+    endif
+endif
+mpause 300
+flushrecv
+exit
+
+; --- ローカルサブルーチン ---
+:init_resolve_path
+    strscan RESOLVE_VAL '\'
+    if result = 0 then
+        strscan RESOLVE_VAL '/'
+        if result = 0 then
+            strscan RESOLVE_VAL ':'
+            if result = 0 then
+                sprintf2 RESOLVE_VAL '%s\%s' BASE_DIR RESOLVE_VAL
+            endif
+        endif
+    endif
+return
+
+:init_write_hdr
+    fileopen f_init INIT_PATH 0
+    if f_init <> -1 then
+        filewriteln f_init INIT_HDR
+        fileclose f_init
+    endif
+return

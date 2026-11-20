@@ -1,0 +1,66 @@
+; ==============================================================================
+; lib\abort_bastion.ttl : 認証失敗・タイムアウト時の安全な踏み台復帰 (SSH / Telnet)
+; ==============================================================================
+
+if IS_TELNET = 0 then
+    ; SSH: Linux pam_faildelay (約2秒) を考慮し自然終了を待ってから Ctrl+C で安全中断
+    timeout = 3
+    wait '__BASTION_RETURN__'
+    if result = 1 then
+        mpause 100
+        flushrecv
+        exit
+    endif
+    send #3
+    mpause 300
+    timeout = 2
+    wait '__BASTION_RETURN__'
+    if result = 1 then
+        mpause 150
+        flushrecv
+        exit
+    endif
+else
+    ; Telnet: Ctrl+] -> 'telnet>' -> quit、出なければ Ctrl+C
+    flushrecv
+    send #29
+    timeout = 2
+    wait 'telnet>' '__BASTION_RETURN__'
+    if result = 1 then
+        sendln 'quit'
+        timeout = 3
+        wait '__BASTION_RETURN__'
+        if result = 1 then
+            mpause 200
+            flushrecv
+            exit
+        endif
+    elseif result = 2 then
+        mpause 200
+        flushrecv
+        exit
+    endif
+    send #3
+    mpause 300
+    timeout = 2
+    wait '__BASTION_RETURN__'
+    if result = 1 then
+        mpause 200
+        flushrecv
+        exit
+    endif
+endif
+
+; 最終同期確認
+testlink
+if result <> 2 then
+    BASTION_LOST = 1
+    exit
+endif
+flushrecv
+sendln 'echo "__BAS""TION_SYNC__"'
+timeout = 3
+wait '__BASTION_SYNC__'
+mpause 200
+flushrecv
+exit

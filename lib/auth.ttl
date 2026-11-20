@@ -1,0 +1,589 @@
+; ==============================================================================
+; lib\auth.ttl : 認証候補選択 (device.csv / credentials.csv) & SSH/Telnet 2段階認証
+;   出力: LOGIN_SUCCESS (1=成功/0=失敗), INIT_PROMPT_IDX, IS_DEVICE_LOGGED_IN,
+;         DEV_USER, DEV_PASS, DEV_ENPASS, DEV_PROTO, DEV_DETAIL, BASTION_LOST
+; ==============================================================================
+
+HAS_DEV_CRED = 0
+strlen DEV_USER
+if result > 0 then
+    HAS_DEV_CRED = 1
+endif
+strlen DEV_PASS
+if result > 0 then
+    HAS_DEV_CRED = 1
+endif
+
+if HAS_DEV_CRED = 1 then
+    ACTIVE_USER   = DEV_USER
+    ACTIVE_PASS   = DEV_PASS
+    ACTIVE_ENPASS = DEV_ENPASS
+    strlen ACTIVE_ENPASS
+    if result = 0 then
+        ACTIVE_ENPASS = ACTIVE_PASS
+    endif
+    if HAS_ORIG_PROTO = 0 then
+        DEV_PROTO = 'ssh'
+        PROTO_DUAL_PHASE = 1
+    else
+        DEV_PROTO = ORIG_DEV_PROTO
+        PROTO_DUAL_PHASE = 0
+    endif
+    AUTH_ATTEMPT = 1
+    goto issue_connect_cmd
+endif
+
+strlen CRED_FILE
+if result > 0 goto open_cred_csv_file
+
+if FALLBACK_TO_BASTION_CRED = 1 then
+    ACTIVE_USER   = BASTION_USER
+    ACTIVE_PASS   = BASTION_PASS
+    ACTIVE_ENPASS = BASTION_PASS
+    AUTH_ATTEMPT  = 1
+    if HAS_ORIG_PROTO = 0 then
+        DEV_PROTO = 'ssh'
+        PROTO_DUAL_PHASE = 1
+    else
+        DEV_PROTO = ORIG_DEV_PROTO
+        PROTO_DUAL_PHASE = 0
+    endif
+    goto issue_connect_cmd
+endif
+DEV_DETAIL = 'No Credentials (credentials.csv missing)'
+exit
+
+; --- 外部パスワードCSV (credentials.csv) ループ ---
+:open_cred_csv_file
+F_CRED_TRIED = 1
+CRED_EOF = 0
+fileopen f_cred CRED_FILE 0 1
+if f_cred = -1 then
+    strlen LAST_FAIL_DETAIL
+    if AUTH_ATTEMPT > 0 && result > 0 then
+        DEV_DETAIL = LAST_FAIL_DETAIL
+    else
+        DEV_DETAIL = 'Credentials CSV Open Failed'
+    endif
+    exit
+endif
+F_CRED_OPEN = 1
+
+:read_cred_csv_loop
+if CRED_EOF = 1 goto cred_csv_eof
+cred_line = ''
+filereadln f_cred cred_line
+if result = 1 then
+    CRED_EOF = 1
+    strlen cred_line
+    if result = 0 goto cred_csv_eof
+endif
+
+; BOM除去・トリム・コメント行スキップ
+strlen cred_line
+if result >= 3 then
+    strcopy cred_line 1 3 B3
+    strcompare B3 #239#187#191
+    if result = 0 then
+        strlen cred_line
+        B_REM = result - 3
+        if B_REM > 0 then
+            strcopy cred_line 4 B_REM cred_line
+        else
+            cred_line = ''
+        endif
+    endif
+endif
+strtrim cred_line TRIM_WS
+strlen cred_line
+if result = 0 goto read_cred_csv_loop
+strcopy cred_line 1 1 fc_c
+strscan CMT_CHARS fc_c
+if result > 0 goto read_cred_csv_loop
+
+strsplit cred_line ',' 4
+C_USER   = groupmatchstr1
+C_PASS   = groupmatchstr2
+C_ENPASS = groupmatchstr3
+C_PROTO  = groupmatchstr4
+strtrim C_USER   TRIM_FIELD
+strtrim C_PASS   TRIM_FIELD
+strtrim C_ENPASS TRIM_FIELD
+strsplit C_PROTO ',' 2
+C_PROTO = groupmatchstr1
+strsplit C_PROTO '#' 2
+C_PROTO = groupmatchstr1
+strsplit C_PROTO ';' 2
+C_PROTO = groupmatchstr1
+strtrim C_PROTO  TRIM_FIELD
+
+tolower H_CU C_USER
+sprintf2 H_CHK '|%s|' H_CU
+strscan HDR_CRED H_CHK
+if result > 0 goto read_cred_csv_loop
+strlen C_USER
+CU_LEN = result
+strlen C_PASS
+CP_LEN = result
+if CU_LEN = 0 && CP_LEN = 0 goto read_cred_csv_loop
+strlen C_ENPASS
+if result = 0 then
+    C_ENPASS = C_PASS
+endif
+
+call auth_norm_proto
+strlen C_PROTO
+CP_PLEN = result
+
+if HAS_ORIG_PROTO = 1 then
+    if CP_PLEN > 0 then
+        strcompare C_PROTO ORIG_DEV_PROTO
+        if result <> 0 then
+            ATT_NO    = '-'
+            ATT_PROTO = C_PROTO
+            ATT_USER  = C_USER
+            ATT_PASS  = '-'
+            sprintf2 ATT_RES 'SKIP_PROTO (CSV=%s Need=%s)' C_PROTO ORIG_DEV_PROTO
+            call auth_log_attempt
+            goto read_cred_csv_loop
+        endif
+    endif
+    DEV_PROTO = ORIG_DEV_PROTO
+    PROTO_DUAL_PHASE = 0
+else
+    if CP_PLEN > 0 then
+        strcompare C_PROTO 'ssh'
+        if result = 0 && SSH_PORT_DEAD = 1 goto read_cred_csv_loop
+        strcompare C_PROTO 'telnet'
+        if result = 0 && TELNET_PORT_DEAD = 1 goto read_cred_csv_loop
+        DEV_PROTO = C_PROTO
+        PROTO_DUAL_PHASE = 0
+    elseif SSH_PORT_DEAD = 0 && TELNET_PORT_DEAD = 0 then
+        DEV_PROTO = 'ssh'
+        PROTO_DUAL_PHASE = 1
+    elseif SSH_PORT_DEAD = 0 then
+        DEV_PROTO = 'ssh'
+        PROTO_DUAL_PHASE = 0
+    elseif TELNET_PORT_DEAD = 0 then
+        DEV_PROTO = 'telnet'
+        PROTO_DUAL_PHASE = 0
+    else
+        fileclose f_cred
+        F_CRED_OPEN = 0
+        DEV_DETAIL = 'Connection Refused (SSH & Telnet)'
+        exit
+    endif
+endif
+
+if HAS_DEV_CRED = 1 && HAS_ORIG_PROTO = 1 && AUTH_ATTEMPT = 1 then
+    strcompare C_USER DEV_USER
+    if result = 0 then
+        strcompare C_PASS DEV_PASS
+        if result = 0 goto read_cred_csv_loop
+    endif
+endif
+
+AUTH_ATTEMPT  = AUTH_ATTEMPT + 1
+ACTIVE_USER   = C_USER
+ACTIVE_PASS   = C_PASS
+ACTIVE_ENPASS = C_ENPASS
+goto issue_connect_cmd
+
+:cred_csv_eof
+fileclose f_cred
+F_CRED_OPEN = 0
+if AUTH_ATTEMPT > 1 then
+    sprintf2 DEV_DETAIL 'All %d Auth Attempts Failed (Password CSV exhausted)' AUTH_ATTEMPT
+elseif AUTH_ATTEMPT = 1 then
+    strlen LAST_FAIL_DETAIL
+    if result > 0 then
+        DEV_DETAIL = LAST_FAIL_DETAIL
+    else
+        DEV_DETAIL = 'Auth Failed'
+    endif
+else
+    strlen LAST_FAIL_DETAIL
+    if result > 0 then
+        DEV_DETAIL = LAST_FAIL_DETAIL
+    elseif HAS_ORIG_PROTO = 1 then
+        sprintf2 DEV_DETAIL 'No Matching Credential in CSV (Need: %s)' ORIG_DEV_PROTO
+    else
+        DEV_DETAIL = 'No Matching Credential in CSV'
+    endif
+endif
+exit
+
+; --- 接続コマンド発行 (SSH / Telnet) ---
+:issue_connect_cmd
+if AUTH_ATTEMPT > 1 && SKIP_RETRY_WAIT = 0 then
+    if AUTH_RETRY_INTERVAL > 0 then
+        pause AUTH_RETRY_INTERVAL
+    else
+        mpause 200
+    endif
+endif
+SKIP_RETRY_WAIT = 0
+
+sprintf2 ATT_NO '#%d' AUTH_ATTEMPT
+ATT_PROTO = DEV_PROTO
+ATT_USER  = ACTIVE_USER
+ATT_PASS  = ACTIVE_PASS
+ATT_RES   = 'TRYING'
+call auth_log_attempt
+
+if paramcnt < 3 then
+    sprintf2 T_STR '[#%d %s] %s (%s) %s' AUTH_ATTEMPT DEV_PROTO DEV_NAME DEV_IP ACTIVE_USER
+    settitle T_STR
+    sprintf2 DLG_MSG '機器: %s (%s)%sプロトコル: %s / 試行: #%d%sユーザー: %s%sパスワード: %s' DEV_NAME DEV_IP CRLF DEV_PROTO AUTH_ATTEMPT CRLF ACTIVE_USER CRLF ACTIVE_PASS
+    statusbox DLG_MSG '接続・認証試行中'
+endif
+
+testlink
+if result <> 2 goto auth_bastion_lost
+flushrecv
+
+IS_TELNET = 0
+strcompare DEV_PROTO 'telnet'
+if result = 0 then
+    IS_TELNET = 1
+endif
+
+if IS_TELNET = 1 then
+    send 'telnet '
+    send DEV_IP
+    sendln ' ; echo "__BAS""TION_RETURN__"'
+else
+    send 'ssh -o NumberOfPasswordPrompts=1 -o StrictHostKeyChecking=no '
+    send '-o UserKnownHostsFile=/dev/null -o PubkeyAuthentication=no '
+    send '-o PreferredAuthentications=keyboard-interactive,password '
+    if SSH_LEGACY_MODE = 1 then
+        send '-o KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1 '
+        send '-o HostKeyAlgorithms=+ssh-rsa -o Ciphers=+aes128-cbc,3des-cbc,aes192-cbc,aes256-cbc '
+    endif
+    strlen SSH_EXTRA_OPTS
+    if result > 0 then
+        send SSH_EXTRA_OPTS
+        send ' '
+    endif
+    strlen ACTIVE_USER
+    if result > 0 then
+        send ACTIVE_USER
+        send '@'
+    endif
+    send DEV_IP
+    sendln ' ; echo "__BAS""TION_RETURN__"'
+endif
+
+STAGE1_USER_SENT = 0
+
+; --- 【第1段階】SSH / Telnet 分離待機 ---
+:login_stage1_loop
+timeout = LOGIN_TIMEOUT
+if IS_TELNET = 1 goto login_stage1_telnet
+
+wait '__BASTION_RETURN__' 'yes/no' 'assword:' 'PASSWORD:' 'Passcode:' 'passphrase' 'no matching' 'no mutual' 'Connection refused' 'パスワード'
+S1 = result
+if S1 = 1 then
+    mpause 200
+    flushrecv
+    if PROTO_DUAL_PHASE = 1 then
+        SKIP_RETRY_WAIT = 1
+    endif
+    LAST_FAIL_DETAIL = 'SSH Closed Before Password Prompt'
+    goto check_next_credential
+elseif S1 = 2 then
+    sendln 'yes'
+    goto login_stage1_loop
+elseif S1 = 3 || S1 = 4 || S1 = 5 || S1 = 10 then
+    sendln ACTIVE_PASS
+    goto login_stage2_wait
+elseif S1 = 6 then
+    include LIB_ABORT
+    if BASTION_LOST = 1 exit
+    LAST_FAIL_DETAIL = 'SSH Key Passphrase Prompted'
+    goto check_next_credential
+elseif S1 = 7 || S1 = 8 then
+    call wait_bastion_or_abort
+    if BASTION_LOST = 1 exit
+    if SSH_LEGACY_MODE = 0 then
+        SSH_LEGACY_MODE = 1
+        SKIP_RETRY_WAIT = 1
+        sprintf2 ATT_NO '#%d' AUTH_ATTEMPT
+        ATT_PROTO = DEV_PROTO
+        ATT_USER  = ACTIVE_USER
+        ATT_PASS  = '-'
+        ATT_RES   = 'RETRY_LEGACY_SSH (Algorithm Mismatch)'
+        call auth_log_attempt
+        goto issue_connect_cmd
+    endif
+    SSH_PORT_DEAD = 1
+    LAST_FAIL_DETAIL = 'SSH Algorithm Mismatch (Check SSH_EXTRA_OPTS)'
+    if PROTO_DUAL_PHASE = 1 || (HAS_ORIG_PROTO = 0 && F_CRED_OPEN = 1) then
+        SKIP_RETRY_WAIT = 1
+        goto check_next_credential
+    endif
+    DEV_DETAIL = LAST_FAIL_DETAIL
+    exit
+elseif S1 = 9 then
+    call wait_bastion_or_abort
+    if BASTION_LOST = 1 exit
+    SSH_PORT_DEAD = 1
+    goto on_port_refused
+endif
+include LIB_ABORT
+if BASTION_LOST = 1 exit
+LAST_FAIL_DETAIL = 'SSH Login Timeout (No Password Prompt)'
+goto check_next_credential
+
+:login_stage1_telnet
+wait '__BASTION_RETURN__' 'login:' 'Login:' 'Username:' 'User:' 'assword:' 'PASSWORD:' 'Connection refused' 'refused' 'パスワード'
+S1 = result
+if S1 = 1 then
+    mpause 200
+    flushrecv
+    LAST_FAIL_DETAIL = 'Telnet Not Accepted / Closed by Host'
+    goto on_telnet_dead
+elseif S1 >= 2 && S1 <= 5 then
+    STAGE1_USER_SENT = STAGE1_USER_SENT + 1
+    if STAGE1_USER_SENT >= 2 then
+        mpause 200
+        flushrecv
+        include LIB_ABORT
+        if BASTION_LOST = 1 exit
+        LAST_FAIL_DETAIL = 'Auth Failed (Username Rejected)'
+        goto check_next_credential
+    endif
+    sendln ACTIVE_USER
+    goto login_stage1_loop
+elseif S1 = 6 || S1 = 7 || S1 = 10 then
+    sendln ACTIVE_PASS
+    goto login_stage2_wait
+elseif S1 = 8 || S1 = 9 then
+    call wait_bastion_or_abort
+    if BASTION_LOST = 1 exit
+    TELNET_PORT_DEAD = 1
+    goto on_port_refused
+endif
+
+sendln ''
+timeout = 5
+wait '__BASTION_RETURN__' 'assword:' 'login:' 'Login:' 'Username:' 'invalid' '>' '#' '$' ']'
+if result = 1 then
+    if STAGE1_USER_SENT = 0 then
+        LAST_FAIL_DETAIL = 'Telnet Not Accepted / Closed'
+        goto on_telnet_dead
+    endif
+    LAST_FAIL_DETAIL = 'Connection Timed Out / Closed'
+    goto check_next_credential
+elseif result = 2 then
+    sendln ACTIVE_PASS
+    goto login_stage2_wait
+elseif result >= 3 && result <= 5 then
+    if STAGE1_USER_SENT = 0 then
+        STAGE1_USER_SENT = 1
+        sendln ACTIVE_USER
+        goto login_stage1_loop
+    endif
+    include LIB_ABORT
+    if BASTION_LOST = 1 exit
+    LAST_FAIL_DETAIL = 'Auth Failed (Login Prompt)'
+    goto check_next_credential
+elseif result = 6 then
+    include LIB_ABORT
+    if BASTION_LOST = 1 exit
+    LAST_FAIL_DETAIL = 'Auth Failed (Invalid)'
+    goto check_next_credential
+elseif result >= 7 && result <= 10 then
+    RES_P = result
+    call auth_set_success
+    exit
+endif
+include LIB_ABORT
+if BASTION_LOST = 1 exit
+if STAGE1_USER_SENT = 0 then
+    LAST_FAIL_DETAIL = 'Telnet Not Accepted (Timeout)'
+    goto on_telnet_dead
+endif
+LAST_FAIL_DETAIL = 'Login Timeout'
+goto check_next_credential
+
+:on_port_refused
+LAST_FAIL_DETAIL = 'Connection Refused / Unreachable'
+if HAS_ORIG_PROTO = 0 then
+    if SSH_PORT_DEAD = 1 && TELNET_PORT_DEAD = 1 then
+        DEV_DETAIL = 'Connection Refused (SSH & Telnet)'
+        exit
+    endif
+    SKIP_RETRY_WAIT = 1
+    goto check_next_credential
+endif
+DEV_DETAIL = LAST_FAIL_DETAIL
+exit
+
+:on_telnet_dead
+TELNET_PORT_DEAD = 1
+if HAS_ORIG_PROTO = 1 || SSH_PORT_DEAD = 1 then
+    DEV_DETAIL = LAST_FAIL_DETAIL
+    exit
+endif
+goto check_next_credential
+
+; --- 【第2段階】パスワード送信後の判定 ---
+:login_stage2_wait
+S2_RETRY = 0
+timeout = LOGIN_TIMEOUT
+:login_stage2_exec
+if IS_TELNET = 1 then
+    wait '__BASTION_RETURN__' 'assword:' 'Login invalid' 'Authentication fail' 'incorrect' 'Username:' '>' '#' '$' ']'
+else
+    wait '__BASTION_RETURN__' 'assword:' 'Permission denied' 'Authentication fail' 'Access denied' 'incorrect' '>' '#' '$' ']'
+endif
+S2 = result
+if S2 = 1 then
+    mpause 200
+    flushrecv
+    LAST_FAIL_DETAIL = 'Auth Rejected / Closed by Host'
+    goto check_next_credential
+elseif S2 >= 2 && S2 <= 6 then
+    if IS_TELNET = 1 then
+        mpause 300
+        flushrecv
+    endif
+    include LIB_ABORT
+    if BASTION_LOST = 1 exit
+    LAST_FAIL_DETAIL = 'Auth Failed (Wrong Password)'
+    goto check_next_credential
+elseif S2 >= 7 && S2 <= 10 then
+    RES_P = S2
+    call auth_set_success
+    exit
+elseif S2_RETRY = 0 then
+    S2_RETRY = 1
+    sendln ''
+    timeout = 5
+    goto login_stage2_exec
+endif
+include LIB_ABORT
+if BASTION_LOST = 1 exit
+LAST_FAIL_DETAIL = 'Post-Auth Timeout'
+goto check_next_credential
+
+; --- 認証失敗時の次候補遷移 ---
+:check_next_credential
+sprintf2 ATT_NO '#%d' AUTH_ATTEMPT
+ATT_PROTO = DEV_PROTO
+ATT_USER  = ACTIVE_USER
+ATT_PASS  = '-'
+sprintf2 ATT_RES 'FAIL (%s)' LAST_FAIL_DETAIL
+call auth_log_attempt
+
+if PROTO_DUAL_PHASE = 1 then
+    PROTO_DUAL_PHASE = 2
+    if TELNET_PORT_DEAD = 0 then
+        DEV_PROTO = 'telnet'
+        AUTH_ATTEMPT = AUTH_ATTEMPT + 1
+        SKIP_RETRY_WAIT = 1
+        goto issue_connect_cmd
+    endif
+endif
+PROTO_DUAL_PHASE = 0
+
+if F_CRED_OPEN = 1 goto read_cred_csv_loop
+strlen CRED_FILE
+if result > 0 && F_CRED_TRIED = 0 && (HAS_DEV_CRED = 0 || FALLBACK_TO_CRED_FILE = 1) goto open_cred_csv_file
+
+if AUTH_ATTEMPT > 1 then
+    sprintf2 DEV_DETAIL 'All %d Auth Attempts Failed' AUTH_ATTEMPT
+else
+    strlen LAST_FAIL_DETAIL
+    if result > 0 then
+        DEV_DETAIL = LAST_FAIL_DETAIL
+    else
+        DEV_DETAIL = 'Auth Failed'
+    endif
+endif
+exit
+
+:auth_bastion_lost
+BASTION_LOST = 1
+exit
+
+; --- ローカルサブルーチン ---
+:auth_set_success
+    LOGIN_SUCCESS = 1
+    IS_DEVICE_LOGGED_IN = 1
+    if RES_P = 7 then
+        INIT_PROMPT_IDX = 1
+    elseif RES_P = 8 then
+        INIT_PROMPT_IDX = 2
+    elseif RES_P = 9 then
+        INIT_PROMPT_IDX = 3
+    else
+        INIT_PROMPT_IDX = 5
+    endif
+    if F_CRED_OPEN = 1 then
+        fileclose f_cred
+        F_CRED_OPEN = 0
+    endif
+    DEV_USER = ACTIVE_USER
+    DEV_PASS = ACTIVE_PASS
+    strlen ACTIVE_ENPASS
+    if result > 0 then
+        DEV_ENPASS = ACTIVE_ENPASS
+    else
+        strlen DEV_ENPASS
+        if result = 0 then
+            DEV_ENPASS = ACTIVE_PASS
+        endif
+    endif
+return
+
+:wait_bastion_or_abort
+    timeout = 5
+    wait '__BASTION_RETURN__'
+    if result = 0 then
+        include LIB_ABORT
+    else
+        mpause 150
+        flushrecv
+    endif
+return
+
+:auth_norm_proto
+    tolower NP_LOW C_PROTO
+    NP_SSH = 0
+    NP_TEL = 0
+    strscan NP_LOW 'ssh'
+    if result > 0 then
+        NP_SSH = 1
+    endif
+    strcompare NP_LOW '22'
+    if result = 0 then
+        NP_SSH = 1
+    endif
+    strscan NP_LOW 'telnet'
+    if result > 0 then
+        NP_TEL = 1
+    endif
+    strcompare NP_LOW '23'
+    if result = 0 then
+        NP_TEL = 1
+    endif
+    if NP_SSH = 1 && NP_TEL = 0 then
+        C_PROTO = 'ssh'
+    elseif NP_TEL = 1 && NP_SSH = 0 then
+        C_PROTO = 'telnet'
+    else
+        C_PROTO = ''
+    endif
+return
+
+:auth_log_attempt
+    getdate ATT_TS '%Y/%m/%d %H:%M:%S'
+    fileopen f_att ATTEMPT_LOG_FILE 1
+    if f_att <> -1 then
+        sprintf2 ATT_LINE '%s,%s,%s,%s,%s,%s,%s,%s' ATT_TS DEV_NAME DEV_IP ATT_NO ATT_PROTO ATT_USER ATT_PASS ATT_RES
+        filewriteln f_att ATT_LINE
+        fileclose f_att
+    endif
+return

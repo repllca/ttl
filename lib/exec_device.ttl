@@ -1,0 +1,321 @@
+; ==============================================================================
+; lib\exec_device.ttl : 特権昇格・ページング解除・プロンプト取得・コマンド実行・切断
+; ==============================================================================
+
+mpause 400
+flushrecv
+
+; --- 1. 特権昇格 (一般モード '>' のみ enable -> 非対応なら Yamaha administrator) ---
+if INIT_PROMPT_IDX >= 2 goto disable_paging
+sendln 'enable'
+timeout = 5
+wait '__BASTION_RETURN__' 'assword:' '#' ']' 'Invalid' 'Unknown' 'not found' 'Error' 'syntax' '>'
+if result = 1 then
+    IS_DEVICE_LOGGED_IN = 0
+    DEV_DETAIL = 'Disconnected During Enable'
+    goto cleanup_done
+elseif result = 2 then
+    sendln DEV_ENPASS
+    timeout = 5
+    wait '__BASTION_RETURN__' '#' ']' '>' 'assword:' 'denied' 'Bad' 'Invalid' 'failed'
+    if result = 1 then
+        IS_DEVICE_LOGGED_IN = 0
+        DEV_DETAIL = 'Disconnected During Enable Password'
+        goto cleanup_done
+    elseif result >= 5 && result <= 9 then
+        ENABLE_FAILED = 1
+        if result = 5 then
+            call exec_cancel_en_pw
+            if EN_DROPPED = 1 goto cleanup_done
+        endif
+    endif
+elseif result >= 5 && result <= 9 then
+    mpause 200
+    flushrecv
+    sendln 'administrator'
+    timeout = 5
+    wait '__BASTION_RETURN__' 'assword:' '#' '>' '$'
+    if result = 1 then
+        IS_DEVICE_LOGGED_IN = 0
+        DEV_DETAIL = 'Disconnected During Administrator Cmd'
+        goto cleanup_done
+    elseif result = 2 then
+        sendln DEV_ENPASS
+        timeout = 5
+        wait '__BASTION_RETURN__' '#' '>' '$' 'assword:' 'Error'
+        if result = 1 then
+            IS_DEVICE_LOGGED_IN = 0
+            DEV_DETAIL = 'Disconnected During Administrator Password'
+            goto cleanup_done
+        elseif result = 5 || result = 6 then
+            ENABLE_FAILED = 1
+            if result = 5 then
+                call exec_cancel_en_pw
+                if EN_DROPPED = 1 goto cleanup_done
+            endif
+        endif
+    endif
+endif
+
+; --- 2. ページング無効化 (Cisco / Juniper / Huawei / Yamaha 全対応) ---
+:disable_paging
+if INIT_PROMPT_IDX = 3 goto detect_final_prompt
+PAGING_DONE = 0
+PAGING_CMD = 'terminal length 0'
+call exec_paging_cmd
+if BASTION_LOST = 1 exit
+if PAGING_DONE = 1 goto detect_final_prompt
+if PAGING_DONE = 2 goto cleanup_done
+
+PAGING_CMD = 'set cli screen-length 0'
+call exec_paging_cmd
+if BASTION_LOST = 1 exit
+if PAGING_DONE = 1 goto detect_final_prompt
+if PAGING_DONE = 2 goto cleanup_done
+
+PAGING_CMD = 'screen-length 0 temporary'
+call exec_paging_cmd
+if BASTION_LOST = 1 exit
+if PAGING_DONE = 1 goto detect_final_prompt
+if PAGING_DONE = 2 goto cleanup_done
+
+sendln 'console lines infinity'
+timeout = 3
+wait '__BASTION_RETURN__' '#' '>' '$' ']'
+if result = 1 then
+    IS_DEVICE_LOGGED_IN = 0
+    DEV_DETAIL = 'Disconnected During Paging Disable'
+    goto cleanup_done
+endif
+
+; --- 3. プロンプト文字列の精密取得 ---
+:detect_final_prompt
+mpause 500
+flushrecv
+sendln ''
+mpause 400
+sendln ''
+timeout = 3
+waitln '#' '>' '$' ']'
+WL_RES = result
+PROMPT_VALID = 0
+if WL_RES >= 1 && WL_RES <= 4 then
+    CAND_PROMPT = inputstr
+    strtrim CAND_PROMPT TRIM_WS
+    strlen CAND_PROMPT
+    P_LEN = result
+    if P_LEN >= 1 && P_LEN <= 40 then
+        strcopy CAND_PROMPT 1 1 P_FIRST
+        strcopy CAND_PROMPT P_LEN 1 P_LAST
+        strscan VALID_ENDS P_LAST
+        P_END_OK = result
+        strscan BAD_STARTS P_FIRST
+        P_BAD = result
+        if P_END_OK > 0 && P_BAD = 0 then
+            PROMPT_SYMBOL = P_LAST
+            FINAL_PROMPT  = CAND_PROMPT
+            PROMPT_VALID  = 1
+        endif
+    endif
+endif
+if PROMPT_VALID = 0 then
+    if INIT_PROMPT_IDX = 1 then
+        PROMPT_SYMBOL = '>'
+    elseif INIT_PROMPT_IDX = 3 then
+        PROMPT_SYMBOL = '$'
+    elseif INIT_PROMPT_IDX = 5 then
+        PROMPT_SYMBOL = ']'
+    else
+        PROMPT_SYMBOL = '#'
+    endif
+    FINAL_PROMPT = PROMPT_SYMBOL
+endif
+mpause 300
+flushrecv
+
+; --- 4. ログ取得 & コマンド順次実行 ---
+sprintf2 LOG_FILE '%s\%s_%s.log' LOG_DIR DEV_NAME RUN_TS
+logclose
+logopen LOG_FILE 0 0
+IS_LOG_OPEN = 1
+sprintf2 LOG_HDR '%s==================================================%s# Host: %s (%s) / Protocol: %s / Logged-in User: %s%s==================================================%s' CRLF CRLF DEV_NAME DEV_IP DEV_PROTO DEV_USER CRLF CRLF
+logwrite LOG_HDR
+
+fileopen f_cmd DEV_CMD 0 1
+if f_cmd = -1 then
+    DEV_DETAIL = 'Command File Not Found'
+    goto cleanup_device
+endif
+CMD_EOF = 0
+
+:read_cmd_loop
+if CMD_EOF = 1 goto end_cmd_loop
+cmd_line = ''
+filereadln f_cmd cmd_line
+if result = 1 then
+    CMD_EOF = 1
+    strlen cmd_line
+    if result = 0 goto end_cmd_loop
+endif
+strlen cmd_line
+if result >= 3 then
+    strcopy cmd_line 1 3 B3
+    strcompare B3 #239#187#191
+    if result = 0 then
+        strlen cmd_line
+        B_REM = result - 3
+        if B_REM > 0 then
+            strcopy cmd_line 4 B_REM cmd_line
+        else
+            cmd_line = ''
+        endif
+    endif
+endif
+strtrim cmd_line TRIM_WS
+strlen cmd_line
+if result = 0 goto read_cmd_loop
+strcopy cmd_line 1 1 c_ch
+strscan CMT_CHARS c_ch
+if result > 0 goto read_cmd_loop
+
+sprintf2 CMD_HDR '%s==================== [ %s ] ====================%s' CRLF cmd_line CRLF
+logwrite CMD_HDR
+testlink
+if result <> 2 then
+    fileclose f_cmd
+    BASTION_LOST = 1
+    exit
+endif
+sendln cmd_line
+
+:wait_cmd_prompt
+timeout = CMD_TIMEOUT
+wait FINAL_PROMPT '--More--' '-- More --' '---(more' 'More:' '続く' 'RETURN' 'any key' '__BASTION_RETURN__'
+if result = 1 goto read_cmd_loop
+if result >= 2 && result <= 6 then
+    send ' '
+    goto wait_cmd_prompt
+elseif result >= 7 && result <= 8 then
+    sendln ''
+    goto wait_cmd_prompt
+elseif result = 9 then
+    fileclose f_cmd
+    IS_DEVICE_LOGGED_IN = 0
+    DEV_DETAIL = 'Disconnected During Command'
+    goto cleanup_done
+endif
+sendln ''
+timeout = 3
+wait FINAL_PROMPT PROMPT_SYMBOL '__BASTION_RETURN__'
+if result = 3 then
+    fileclose f_cmd
+    IS_DEVICE_LOGGED_IN = 0
+    DEV_DETAIL = 'Disconnected During Command'
+    goto cleanup_done
+endif
+goto read_cmd_loop
+
+:end_cmd_loop
+fileclose f_cmd
+DEV_STATUS = 'OK'
+if ENABLE_FAILED = 1 then
+    DEV_DETAIL = 'Success (Enable Failed - User Mode)'
+elseif AUTH_ATTEMPT > 1 then
+    sprintf2 DEV_DETAIL 'Success (Candidate #%d matched)' AUTH_ATTEMPT
+else
+    DEV_DETAIL = 'Success'
+endif
+
+; --- 5. 安全切断 ---
+:cleanup_device
+if IS_LOG_OPEN = 1 then
+    logclose
+    IS_LOG_OPEN = 0
+endif
+if IS_DEVICE_LOGGED_IN = 1 then
+    testlink
+    if result <> 2 then
+        BASTION_LOST = 1
+        exit
+    endif
+    mpause 300
+    flushrecv
+    sendln 'exit'
+    timeout = 7
+    wait '__BASTION_RETURN__' 'Save new configuration ? (y/n)' 'Save? [yes/no]' '(y/n)' '[y/n]'
+    if result = 1 goto cleanup_done
+    if result >= 2 && result <= 5 then
+        sendln 'n'
+        timeout = 7
+        wait '__BASTION_RETURN__'
+        if result = 1 goto cleanup_done
+    endif
+    sendln 'quit'
+    timeout = 5
+    wait '__BASTION_RETURN__'
+    if result = 1 goto cleanup_done
+    if IS_TELNET = 0 then
+        sendln ''
+        mpause 200
+        send '~.'
+        timeout = 3
+        wait '__BASTION_RETURN__'
+        if result = 1 then
+            send #3
+            mpause 150
+            goto cleanup_done
+        endif
+    endif
+    include LIB_ABORT
+    if BASTION_LOST = 1 exit
+endif
+
+:cleanup_done
+IS_DEVICE_LOGGED_IN = 0
+mpause 200
+flushrecv
+if IS_LOG_OPEN = 1 then
+    logclose
+    IS_LOG_OPEN = 0
+endif
+exit
+
+; --- ローカルサブルーチン ---
+:exec_cancel_en_pw
+    EN_DROPPED = 0
+    send #3
+    mpause 300
+    sendln ''
+    timeout = 3
+    wait '__BASTION_RETURN__' '>' '#'
+    if result = 1 then
+        IS_DEVICE_LOGGED_IN = 0
+        DEV_DETAIL = 'Disconnected During Enable Password'
+        EN_DROPPED = 1
+    endif
+return
+
+:exec_paging_cmd
+    testlink
+    if result <> 2 then
+        BASTION_LOST = 1
+        return
+    endif
+    sendln PAGING_CMD
+    timeout = 3
+    wait '__BASTION_RETURN__' 'Invalid' 'Unknown' 'Error' 'syntax' '#' '>' '$' ']'
+    if result = 1 then
+        IS_DEVICE_LOGGED_IN = 0
+        DEV_DETAIL = 'Disconnected During Paging Disable'
+        PAGING_DONE = 2
+    elseif result >= 6 && result <= 9 then
+        PAGING_DONE = 1
+    elseif result >= 2 && result <= 5 then
+        wait '__BASTION_RETURN__' '#' '>' '$' ']'
+        if result = 1 then
+            IS_DEVICE_LOGGED_IN = 0
+            DEV_DETAIL = 'Disconnected During Paging Disable'
+            PAGING_DONE = 2
+        endif
+    endif
+return

@@ -33,8 +33,13 @@
 
 ```text
 .
-├── device_runner.ttl        # メインマクロ本体（Tera Term 4.02〜4.x 互換・フル機能版 / 約2,866行）
-├── device_runner_slim.ttl   # スリム版マクロ（Tera Term 4.85+ / 5.x 向け・約1,330行）
+├── runner.ttl               # ★分割版メインマクロ（Tera Term 5.x / 5.4.1 向け・366行・おすすめ）
+├── lib/                     # runner.ttl から include される機能別モジュール群
+│   ├── init.ttl             #   起動設定・パス解決・ログCSV準備・踏み台接続 (139行)
+│   ├── auth.ttl             #   credentials.csv 選択・SSH/Telnet 2段階ログイン (589行)
+│   ├── exec_device.ttl      #   特権昇格・ページング解除・コマンド実行・切断 (321行)
+│   └── abort_bastion.ttl    #   認証失敗/タイムアウト時の安全な踏み台復帰 (66行)
+├── device_runner.ttl        # 現行1ファイル版（Tera Term 4.02〜4.x 互換・2,866行）
 ├── device.csv               # 接続対象機器リスト
 ├── credentials.csv          # 共通パスワード一覧（自動試行用）
 ├── commands_universal.txt   # 機種不明時用 汎用コマンド一覧
@@ -46,15 +51,15 @@
 ├── tests/                   # 静的解析・実機互換エミュレータ・E2Eテスト一式
 │   ├── test_device_runner.py
 │   ├── test_end_to_end.py
-│   ├── test_slim_runner.py
+│   ├── test_modular_runner.py
 │   ├── mock_lab.py
 │   └── ttl_engine.py
 └── archive/                 # 旧プロトタイプ・参考用ファイル保管場所
 ```
 
 ### マクロの使い分け
-- **`device_runner_slim.ttl`（おすすめ / Tera Term 4.85+・5.x）**: `strsplit` / `strtrim` / `tolower` / `sprintf2` / `&&` / `||` を活用し、インライン複数候補（`user1|user2`）と不要な起動時ポップアップを省いて **約半分（1,330行）** にスリム化した版です。マルチベンダー対応・`credentials.csv`・SSH旧アルゴリズム自動リトライ・Telnet即打ち切り等はすべて維持しています。
-- **`device_runner.ttl`（現行 / 旧 Tera Term 互換フル機能版）**: インライン複数候補（`user1|user2`）・起動時ファイル選択ポップアップ等も含むフル機能版です。
+- **`runner.ttl` ＋ `lib/`（おすすめ / Tera Term 5.x・5.4.1 対応）**: `include` による役割別ファイル分割とモダン命令（`strsplit` / `strtrim` / `tolower` / `sprintf2` / `&&` / `||`）を採用し、メインファイルを **366行** まで整理した版です。マルチベンダー対応・`credentials.csv`・SSH旧アルゴリズム自動リトライ・Telnet即打ち切り等はすべて維持しています。
+- **`device_runner.ttl`（現行 / 旧 Tera Term 4.x 互換 1ファイル版）**: 1ファイル完結・インライン複数候補（`user1|user2`）・起動時ファイル選択ポップアップ等を含む現行版です。
 
 ---
 
