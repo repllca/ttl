@@ -66,6 +66,10 @@ jobs:
           }
           Write-Host "Found real ttpmacro.exe at: $($ttp.FullName)"
           "TTPMACRO_EXE=$($ttp.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $iniPath = Join-Path $ttp.DirectoryName "TERATERM.INI"
+          if (Test-Path $iniPath) {
+            (Get-Content $iniPath) -replace 'ConfirmDisconnect=on', 'ConfirmDisconnect=off' | Set-Content $iniPath
+          }
 
       - name: Run Real Tera Term 5.4.1 Macro Against Real SSH2 & Telnet Servers
         shell: pwsh
