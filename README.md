@@ -9,8 +9,9 @@
 - **Tera Term 4.0x / 4.x 実機完全互換**:
   - Ver 4.53+ の新設コマンド（`strsplit`, `break`, `continue`, `sprintf2`, `tolower` 等）を排除。
   - `wait` / `waitln` の引数上限（10個）、ダイアログ文字列 255 バイト上限、`CRLF = #13#10`、実機特有の `and` / `or` 演算子優先順位（全条件括弧囲み）、`filereadln` の最終行（末尾改行なし）EOF 仕様まで完全対応。
-- **外部パスワード一覧（`credentials.csv`）による自動総当たり認証**:
+- **外部パスワード一覧（`credentials.csv`）による自動総当たり & リアルタイム最適化**:
   - `device.csv` のユーザー名・パスワード列が空欄の機器に対して、`credentials.csv` の候補を上から順に自動試行します。
+  - **リアルタイム先頭移動**（`REORDER_CRED_CSV = 1`、`runner.ttl`）：ログインに成功した行を即座に `credentials.csv` の先頭（コメント／ヘッダ直後）へ移動し、次機器からの試行回数を最小化します。
   - 試行中のユーザー名・パスワード・プロトコルは画面タイトルと `statusbox` にリアルタイム表示されます。
   - `FALLBACK_TO_BASTION_CRED = 0`（デフォルト）により、意図せず踏み台のユーザー名が対象機器へ流用されるのを防止します。
 - **SSH / Telnet の自動判別・高速フォールバック**:
@@ -22,9 +23,9 @@
   - 一般モード（`>`）のみ `enable` を試行し、非対応機器（Yamaha 等）では `administrator` へ自動フォールバックします。
   - ベンダー別ページング無効化コマンドを順次送信し、途中の `--More--` / `続く` 等も自動でスペース送りします。
 - **充実したログ・診断出力**:
-  - `logs/<ホスト名>_YYYYMMDD_HHMMSS.log`: 機器ごとのコマンド実行生ログ
-  - `logs/summary_YYYYMMDD_HHMMSS.csv`: 全機器の成否（`OK`/`NG`）・プロンプト・詳細・ログインユーザー一覧
-  - `logs/resolved_accounts_YYYYMMDD_HHMMSS.csv`: ログイン成功したアカウント・プロトコルの一覧
+  - `logs/devices/<ホスト名>_YYYYMMDD_HHMMSS.log`: 機器ごとのコマンド実行生ログ（`DEF_DEV_LOG_SUBDIR = 'devices'` でサマリCSVとフォルダ分離）
+  - `logs/summary_YYYYMMDD_HHMMSS.csv`: 全機器の成否（`OK`/`NG`）・プロンプト・詳細・**ログインユーザー名・パスワード**一覧
+  - `logs/resolved_accounts_YYYYMMDD_HHMMSS.csv`: ログイン成功したアカウント（ユーザー名・パスワード）・プロトコルの一覧
   - `logs/attempts_YYYYMMDD_HHMMSS.csv`: 各試行のユーザー・パスワード・プロトコル・`SKIP_PROTO` / `FAIL (原因)` 履歴
 
 ---
@@ -33,13 +34,13 @@
 
 ```text
 .
-├── runner.ttl               # ★分割版メインマクロ（Tera Term 5.x / 5.4.1 向け・366行・おすすめ）
+├── runner.ttl               # ★分割版メインマクロ（Tera Term 5.x / 5.4.1 向け・おすすめ）
 ├── lib/                     # runner.ttl から include される機能別モジュール群
-│   ├── init.ttl             #   起動設定・パス解決・ログCSV準備・踏み台接続 (139行)
-│   ├── auth.ttl             #   credentials.csv 選択・SSH/Telnet 2段階ログイン (589行)
-│   ├── exec_device.ttl      #   特権昇格・ページング解除・コマンド実行・切断 (321行)
-│   └── abort_bastion.ttl    #   認証失敗/タイムアウト時の安全な踏み台復帰 (66行)
-├── device_runner.ttl        # 現行1ファイル版（Tera Term 4.02〜4.x 互換・2,866行）
+│   ├── init.ttl             #   起動設定・パス解決・ログCSV/devicesフォルダ準備・踏み台接続
+│   ├── auth.ttl             #   credentials.csv 選択・リアルタイム先頭移動・SSH/Telnet 2段階ログイン
+│   ├── exec_device.ttl      #   特権昇格・ページング解除・コマンド実行・切断
+│   └── abort_bastion.ttl    #   認証失敗/タイムアウト時の安全な踏み台復帰
+├── device_runner.ttl        # 互換用レガシー1ファイル版（Tera Term 4.02〜4.x 互換・2,866行）
 ├── device.csv               # 接続対象機器リスト
 ├── credentials.csv          # 共通パスワード一覧（自動試行用）
 ├── commands_universal.txt   # 機種不明時用 汎用コマンド一覧
@@ -48,18 +49,19 @@
 ├── commands_linux.txt       # Linux 向けコマンド一覧
 ├── Makefile                 # 自動テスト・構文チェック・掃除コマンド
 ├── README.md                # 本ドキュメント
-├── tests/                   # 静的解析・実機互換エミュレータ・E2Eテスト一式
+├── tests/                   # 静的解析・実機互換エミュレータ・実Tera Term CIサーバ・E2Eテスト一式
 │   ├── test_device_runner.py
 │   ├── test_end_to_end.py
 │   ├── test_modular_runner.py
+│   ├── real_ssh_ci_server.py
 │   ├── mock_lab.py
 │   └── ttl_engine.py
 └── archive/                 # 旧プロトタイプ・参考用ファイル保管場所
 ```
 
 ### マクロの使い分け
-- **`runner.ttl` ＋ `lib/`（おすすめ / Tera Term 5.x・5.4.1 対応）**: `include` による役割別ファイル分割とモダン命令（`strsplit` / `strtrim` / `tolower` / `sprintf2` / `&&` / `||`）を採用し、メインファイルを **366行** まで整理した版です。マルチベンダー対応・`credentials.csv`・SSH旧アルゴリズム自動リトライ・Telnet即打ち切り等はすべて維持しています。
-- **`device_runner.ttl`（現行 / 旧 Tera Term 4.x 互換 1ファイル版）**: 1ファイル完結・インライン複数候補（`user1|user2`）・起動時ファイル選択ポップアップ等を含む現行版です。
+- **`runner.ttl` ＋ `lib/`（おすすめ / Tera Term 5.x・5.4.1 対応）**: `include` による役割別ファイル分割とモダン命令を採用し、`credentials.csv` のリアルタイム先頭移動・結果CSVへのパスワード出力・`logs\devices\` 分離・無人実行（`SILENT_MODE`）を備えた最新版です。GitHub Actions 上で本物の Tera Term 5.4.1（`ttpmacro.exe`）＋実 SSH2/Telnet サーバによる E2E 検証も行っています。
+- **`device_runner.ttl`（互換用レガシー版 / Tera Term 4.02〜4.x）**: 1ファイル完結・インライン複数候補（`user1|user2`）を含む旧バージョンです（※新機能は `runner.ttl` のみに実装されています）。
 
 ---
 

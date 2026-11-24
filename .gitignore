@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 *.log
 logs/
+ci_logs/
+ci_cred.csv
+ci_device.csv
