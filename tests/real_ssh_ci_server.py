@@ -269,6 +269,7 @@ def handle_bastion_conn(client_sock, target_ssh_port, target_telnet_port):
             if cmd is None:
                 break
             cmd_s = cmd.strip()
+            print(f"[BASTION RECV] {cmd_s!r}", flush=True)
             if not cmd_s:
                 chan.sendall(b"\r\n" + prompt)
                 continue

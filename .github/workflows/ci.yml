@@ -89,7 +89,9 @@ jobs:
             "CI-NO-TELNET,192.168.10.251,,,,telnet,commands_cisco.txt"
           ) | Set-Content -Path $devCsv -Encoding UTF8
 
-          $srv = Start-Process -FilePath "python" -ArgumentList "tests/real_ssh_ci_server.py" -PassThru -NoNewWindow
+          $srvOut = Join-Path $ws "ci_server_out.log"
+          $srvErr = Join-Path $ws "ci_server_err.log"
+          $srv = Start-Process -FilePath "python" -ArgumentList "tests/real_ssh_ci_server.py" -RedirectStandardOutput $srvOut -RedirectStandardError $srvErr -PassThru -NoNewWindow
           Start-Sleep -Seconds 2
 
           try {
@@ -108,11 +110,20 @@ jobs:
             )
             Write-Host "Launching real ttpmacro.exe: $env:TTPMACRO_EXE $($macroArgs -join ' ')"
             $proc = Start-Process -FilePath $env:TTPMACRO_EXE -ArgumentList $macroArgs -PassThru
-            $finished = $proc.WaitForExit(120000)
+            $finished = $proc.WaitForExit(90000)
             if (-not $finished) {
               Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
               Get-Process ttermpro -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-              Write-Error "Real ttpmacro.exe timed out after 120s!"
+              Write-Host "=== CI SERVER STDOUT ==="
+              if (Test-Path $srvOut) { Get-Content $srvOut }
+              Write-Host "=== CI SERVER STDERR ==="
+              if (Test-Path $srvErr) { Get-Content $srvErr }
+              Write-Host "=== CI LOGS FILES ==="
+              if (Test-Path $logDir) {
+                Get-ChildItem -Path $logDir -Recurse | ForEach-Object { Write-Host $_.FullName }
+                Get-ChildItem -Path $logDir -Filter "*.csv" | ForEach-Object { Write-Host "--- $($_.Name) ---"; Get-Content $_.FullName }
+              }
+              Write-Error "Real ttpmacro.exe timed out after 90s!"
               exit 1
             }
             Write-Host "Real ttpmacro.exe exited cleanly with code: $($proc.ExitCode)"
