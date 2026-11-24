@@ -280,6 +280,9 @@ if ALREADY_CONNECTED = 0 then
         mpause 500
     endif
     disconnect 0
+    if SILENT_MODE = 1 then
+        closett
+    endif
 endif
 if SILENT_MODE = 0 then
     sprintf2 END_MSG '全機器の処理が完了しました。%s対象: %d台 (OK: %d / NG: %d)%s保存先: %s' CRLF TOTAL_COUNT OK_COUNT NG_COUNT CRLF LOG_DIR
