@@ -23,6 +23,7 @@ DEF_DEV_LOG_SUBDIR = 'devices'      ; 機器個別ログを別ディレクトリ
 DEF_CMD_NAME   = 'commands_universal.txt'
 
 REORDER_CRED_CSV         = 1        ; 1: 成功したcredentials.csvの行をリアルタイムで先頭へ移動
+SILENT_MODE              = 0        ; 1: 完了/エラーダイアログを非表示(CI・無人バッチ実行用)
 FALLBACK_TO_CRED_FILE    = 0        ; 1: device.csv固有PW失敗時にcredentials.csvも試行
 FALLBACK_TO_BASTION_CRED = 0        ; 0: 空欄時に踏み台ユーザーを自動流用しない(推奨)
 LOGIN_TIMEOUT       = 12            ; ログイン待機最大秒数
@@ -280,8 +281,10 @@ if ALREADY_CONNECTED = 0 then
     endif
     disconnect 0
 endif
-sprintf2 END_MSG '全機器の処理が完了しました。%s対象: %d台 (OK: %d / NG: %d)%s保存先: %s' CRLF TOTAL_COUNT OK_COUNT NG_COUNT CRLF LOG_DIR
-messagebox END_MSG '完了'
+if SILENT_MODE = 0 then
+    sprintf2 END_MSG '全機器の処理が完了しました。%s対象: %d台 (OK: %d / NG: %d)%s保存先: %s' CRLF TOTAL_COUNT OK_COUNT NG_COUNT CRLF LOG_DIR
+    messagebox END_MSG '完了'
+endif
 end
 
 :bastion_disconnected
@@ -295,8 +298,10 @@ fileclose f_csv
 if paramcnt < 3 then
     closesbox
 endif
-sprintf2 ERR_MSG '踏み台サーバとの通信が切断されました。%s中断時の対象: %s (%s)%s途中までのログは保存されています。' CRLF DEV_NAME DEV_IP CRLF
-messagebox ERR_MSG '踏み台切断エラー'
+if SILENT_MODE = 0 then
+    sprintf2 ERR_MSG '踏み台サーバとの通信が切断されました。%s中断時の対象: %s (%s)%s途中までのログは保存されています。' CRLF DEV_NAME DEV_IP CRLF
+    messagebox ERR_MSG '踏み台切断エラー'
+endif
 end
 
 ; --- 8. メイン用ローカルサブルーチン ---

@@ -33,7 +33,7 @@ jobs:
           if-no-files-found: ignore
 
   windows-validation:
-    name: Windows Real Tera Term & E2E Validation
+    name: Windows Real Tera Term 5.4.1 & Real SSH2/Telnet E2E
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -48,26 +48,109 @@ jobs:
         run: |
           python -m unittest discover -s tests -v
 
-      - name: Install Tera Term via Chocolatey
+      - name: Install paramiko for Real SSH2 CI Server
         run: |
-          choco install teraterm -y --no-progress
+          pip install --quiet paramiko
+          python tests/real_ssh_ci_server.py --self-test
 
-      - name: Verify ttpmacro.exe binary presence
+      - name: Download Portable Tera Term 5.4.1
         shell: pwsh
         run: |
-          $ttpPath = "C:\Program Files (x86)\teraterm\ttpmacro.exe"
-          if (Test-Path $ttpPath) {
-            Write-Host "Tera Term ttpmacro.exe successfully detected at $ttpPath"
-            Get-Item $ttpPath | Select-Object Name, Length, VersionInfo | Format-List
-          } else {
-            Write-Error "ttpmacro.exe not found at $ttpPath"
+          $zipPath = "$env:RUNNER_TEMP\teraterm-5.4.1.zip"
+          Invoke-WebRequest -Uri "https://github.com/TeraTermProject/teraterm/releases/download/v5.4.1/teraterm-5.4.1.zip" -OutFile $zipPath
+          Expand-Archive -Path $zipPath -DestinationPath "C:\teraterm5" -Force
+          $ttp = Get-ChildItem -Path "C:\teraterm5" -Filter "ttpmacro.exe" -Recurse | Select-Object -First 1
+          if (-not $ttp) {
+            Write-Error "ttpmacro.exe not found in C:\teraterm5"
             exit 1
           }
+          Write-Host "Found real ttpmacro.exe at: $($ttp.FullName)"
+          "TTPMACRO_EXE=$($ttp.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Run Real Tera Term 5.4.1 Macro Against Real SSH2 & Telnet Servers
+        shell: pwsh
+        run: |
+          $ws = (Get-Location).Path
+          $credCsv = Join-Path $ws "ci_cred.csv"
+          $devCsv  = Join-Path $ws "ci_device.csv"
+          $logDir  = Join-Path $ws "ci_logs"
+
+          @(
+            "# Username,Password,EnablePassword,Protocol",
+            "wrong_u,WRONG_PASS,,",
+            "admin,Pass1234,EnablePass123,"
+          ) | Set-Content -Path $credCsv -Encoding UTF8
+
+          @(
+            "# Hostname,IP,Username,Password,EnablePassword,Protocol,CommandFile",
+            "CI-SSH-AUTO,192.168.10.1,,,,ssh,commands_cisco.txt",
+            "CI-LEGACY-SSH,192.168.10.249,,,,ssh,commands_cisco.txt",
+            "CI-TELNET-AUTO,192.168.10.252,,,,,commands_cisco.txt",
+            "CI-NO-TELNET,192.168.10.251,,,,telnet,commands_cisco.txt"
+          ) | Set-Content -Path $devCsv -Encoding UTF8
+
+          $srv = Start-Process -FilePath "python" -ArgumentList "tests/real_ssh_ci_server.py" -PassThru -NoNewWindow
+          Start-Sleep -Seconds 2
+
+          try {
+            $runnerTtl = Join-Path $ws "runner.ttl"
+            $macroArgs = @(
+              "/V",
+              "`"$runnerTtl`"",
+              "`"$logDir`"",
+              "mock_pass",
+              "`"$devCsv`"",
+              "`"$credCsv`"",
+              "1",
+              "127.0.0.1",
+              "2222",
+              "bastion_user"
+            )
+            Write-Host "Launching real ttpmacro.exe: $env:TTPMACRO_EXE $($macroArgs -join ' ')"
+            $proc = Start-Process -FilePath $env:TTPMACRO_EXE -ArgumentList $macroArgs -PassThru
+            $finished = $proc.WaitForExit(120000)
+            if (-not $finished) {
+              Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+              Get-Process ttermpro -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+              Write-Error "Real ttpmacro.exe timed out after 120s!"
+              exit 1
+            }
+            Write-Host "Real ttpmacro.exe exited cleanly with code: $($proc.ExitCode)"
+          }
+          finally {
+            Stop-Process -Id $srv.Id -Force -ErrorAction SilentlyContinue
+            Get-Process ttermpro -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          }
+
+          python -c @"
+          import glob, os, sys
+          log_dir = r'$logDir'
+          sums = glob.glob(os.path.join(log_dir, 'summary_*.csv'))
+          assert sums, f'No summary CSV found in {log_dir}'
+          with open(sums[-1], 'r', encoding='utf-8') as f:
+              txt = f.read()
+          print('=== REAL TERA TERM SUMMARY ===\n' + txt)
+          rows = {l.split(',')[1]: l.split(',') for l in txt.splitlines() if l.strip() and not l.startswith('Timestamp')}
+          assert rows['CI-SSH-AUTO'][5] == 'OK' and rows['CI-SSH-AUTO'][7] == 'admin' and rows['CI-SSH-AUTO'][8] == 'Pass1234', rows
+          assert rows['CI-LEGACY-SSH'][5] == 'OK' and rows['CI-LEGACY-SSH'][3] == 'ssh', rows
+          assert rows['CI-TELNET-AUTO'][5] == 'OK' and rows['CI-TELNET-AUTO'][3] == 'telnet', rows
+          assert rows['CI-NO-TELNET'][5] == 'NG' and 'Telnet Not Accepted' in rows['CI-NO-TELNET'][6], rows
+
+          dev_logs = glob.glob(os.path.join(log_dir, 'devices', 'CI-SSH-AUTO_*.log'))
+          assert dev_logs, 'Device log missing from logs/devices/'
+          with open(dev_logs[0], 'r', encoding='utf-8') as f:
+              assert 'Cisco IOS Software' in f.read()
+
+          with open(r'$credCsv', 'r', encoding='utf-8') as f:
+              clines = [l.strip() for l in f if l.strip()]
+          assert clines[1] == 'admin,Pass1234,EnablePass123,', f'Expected promoted row first, got: {clines}'
+          print('ALL REAL TERA TERM 5.4.1 E2E ASSERTIONS PASSED!')
+          "@
 
       - name: Upload Windows Logs Artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: execution-logs-windows
-          path: logs/
+          path: ci_logs/
           if-no-files-found: ignore

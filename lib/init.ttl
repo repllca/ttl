@@ -25,6 +25,30 @@ if paramcnt >= 2 then
     if paramcnt >= 5 then
         CRED_FILE = param5
     endif
+    if paramcnt >= 6 then
+        strcompare param6 '1'
+        if result = 0 then
+            SILENT_MODE = 1
+        endif
+    endif
+    if paramcnt >= 7 then
+        strlen param7
+        if result > 0 then
+            BASTION_HOST = param7
+        endif
+    endif
+    if paramcnt >= 8 then
+        strlen param8
+        if result > 0 then
+            BASTION_PORT = param8
+        endif
+    endif
+    if paramcnt >= 9 then
+        strlen param9
+        if result > 0 then
+            BASTION_USER = param9
+        endif
+    endif
 else
     ; 対話モード: 踏み台未接続時のみ接続情報を入力 (接続済みならポップアップなし即実行)
     if ALREADY_CONNECTED = 0 then
@@ -109,15 +133,22 @@ call init_write_hdr
 ; 未接続時のみ踏み台へSSH接続
 if ALREADY_CONNECTED = 0 then
     sprintf2 CONNECT_STR '%s:%s /ssh /2 /auth=password /user=%s /passwd=%s' BASTION_HOST BASTION_PORT BASTION_USER BASTION_PASS
+    if SILENT_MODE = 1 then
+        strconcat CONNECT_STR ' /nosecuritywarning'
+    endif
     connect CONNECT_STR
     if result <> 2 then
-        messagebox '踏み台サーバへのSSH接続に失敗しました。' '接続エラー'
+        if SILENT_MODE = 0 then
+            messagebox '踏み台サーバへのSSH接続に失敗しました。' '接続エラー'
+        endif
         end
     endif
     timeout = 15
     wait BASTION_PROMPT '#' '$' '%' '>'
     if result = 0 then
-        messagebox '踏み台プロンプト待機がタイムアウトしました。' '接続エラー'
+        if SILENT_MODE = 0 then
+            messagebox '踏み台プロンプト待機がタイムアウトしました。' '接続エラー'
+        endif
         disconnect 0
         end
     endif
