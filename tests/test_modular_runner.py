@@ -29,7 +29,7 @@ VALID_TTL_5X_COMMANDS = {
     "wait", "waitln", "waitrecv", "waitregex", "flushrecv", "sendln", "send",
     "fileopen", "filereadln", "filewriteln", "fileclose",
     "strconcat", "strcopy", "strcompare", "strlen", "strscan", "sprintf", "sprintf2",
-    "strsplit", "strtrim", "tolower", "toupper", "strmatch", "getdate",
+    "strsplit", "strtrim", "strdim", "tolower", "toupper", "strmatch", "getdate",
     "logopen", "logwrite", "logclose", "pause", "mpause", "timeout", "end", "exit", "goto",
     "include", "if", "then", "else", "elseif", "endif",
     "closett", "call", "return", "exec", "getdir", "setdir", "testlink",
@@ -82,7 +82,7 @@ class TestModularTTLSyntax(unittest.TestCase):
                     args = re.findall(r"'[^']*'|\"[^\"]*\"|\S+", arg_part)
                     self.assertLessEqual(len(args), 10, f"{path}:{line_no}: wait exceeds 10 args: {args}")
 
-                if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*\s*=", code):
+                if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?\s*=", code):
                     cmd = code.split()[0].lower()
                     self.assertIn(cmd, VALID_TTL_5X_COMMANDS, f"{path}:{line_no}: unknown command '{cmd}'")
 
@@ -194,13 +194,33 @@ class TestModularTTLEndToEnd(unittest.TestCase):
             self.assertEqual(res["MOD-SHORTHAND"][5], "OK")
             self.assertEqual(res["MOD-SHORTHAND"][3], "ssh")
             self.assertEqual(res["MOD-SHORTHAND"][7], "admin")
+            self.assertEqual(res["MOD-SHORTHAND"][8], "Pass1234")
+            self.assertEqual(res["MOD-NO-TELNET"][7], "-")
+            self.assertEqual(res["MOD-NO-TELNET"][8], "-")
 
-            cisco_logs = glob.glob(os.path.join(logs_dir, "MOD-CISCO-01_*.log"))
+            # Verify resolved_accounts_*.csv also contains LoggedInUser & LoggedInPass
+            resolved_files = glob.glob(os.path.join(logs_dir, "resolved_accounts_*.csv"))
+            self.assertGreater(len(resolved_files), 0)
+            with open(resolved_files[-1], "r", encoding="utf-8") as f:
+                res_text = f.read()
+            self.assertIn("MOD-CISCO-01,192.168.10.1,admin,Pass1234,ssh,OK", res_text)
+
+            # Verify device logs are separated into logs/devices/, NOT directly under logs/
+            self.assertEqual(len(glob.glob(os.path.join(logs_dir, "*.log"))), 0)
+            cisco_logs = glob.glob(os.path.join(logs_dir, "devices", "MOD-CISCO-01_*.log"))
             self.assertEqual(len(cisco_logs), 1)
             with open(cisco_logs[0], "r", encoding="utf-8") as f:
                 clog = f.read()
             self.assertIn("==================== [ show version ] ====================", clog)
             self.assertIn("==================== [ show ip interface brief ] ====================", clog)
+
+            # Verify real-time credentials.csv reordering:
+            # 'admin,Pass1234,EnablePass123,' was row 4 initially, and must now be the FIRST data row!
+            with open(temp_cred, "r", encoding="utf-8") as f:
+                cred_lines = [l for l in f.read().splitlines() if l.strip()]
+            self.assertEqual(cred_lines[0], "# Username,Password,EnablePassword,Protocol")
+            self.assertEqual(cred_lines[1], "admin,Pass1234,EnablePass123,")
+            self.assertEqual(len(cred_lines), 5)
 
             att_files = glob.glob(os.path.join(logs_dir, "attempts_*.csv"))
             self.assertGreater(len(att_files), 0)
@@ -210,6 +230,10 @@ class TestModularTTLEndToEnd(unittest.TestCase):
             self.assertIn("SKIP_PROTO (CSV=telnet Need=ssh)", att_text)
             self.assertIn("RETRY_LEGACY_SSH", att_text)
             self.assertIn("FAIL (Auth", att_text)
+            # Because MOD-CISCO-01 promoted admin to row 1, MOD-JUNIPER-01 & MOD-SHORTHAND must succeed on #1!
+            juniper_tries = [l for l in att_lines if ",MOD-JUNIPER-01," in l and ",TRYING" in l]
+            self.assertEqual(len(juniper_tries), 1)
+            self.assertIn(",#1,ssh,admin,Pass1234,TRYING", juniper_tries[0])
             no_telnet_tries = [l for l in att_lines if ",MOD-NO-TELNET," in l and ",TRYING" in l]
             self.assertEqual(len(no_telnet_tries), 1)
         finally:

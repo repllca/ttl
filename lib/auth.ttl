@@ -4,6 +4,10 @@
 ;         DEV_USER, DEV_PASS, DEV_ENPASS, DEV_PROTO, DEV_DETAIL, BASTION_LOST
 ; ==============================================================================
 
+CRED_FROM_FILE = 0
+CRED_RAW_MATCH = ''
+CRED_DATA_IDX  = 0
+
 HAS_DEV_CRED = 0
 strlen DEV_USER
 if result > 0 then
@@ -184,6 +188,9 @@ if HAS_DEV_CRED = 1 && HAS_ORIG_PROTO = 1 && AUTH_ATTEMPT = 1 then
 endif
 
 AUTH_ATTEMPT  = AUTH_ATTEMPT + 1
+CRED_DATA_IDX = CRED_DATA_IDX + 1
+CRED_FROM_FILE = 1
+CRED_RAW_MATCH = cred_line
 ACTIVE_USER   = C_USER
 ACTIVE_PASS   = C_PASS
 ACTIVE_ENPASS = C_ENPASS
@@ -525,6 +532,9 @@ exit
         fileclose f_cred
         F_CRED_OPEN = 0
     endif
+    if REORDER_CRED_CSV = 1 && CRED_FROM_FILE = 1 && CRED_DATA_IDX > 1 then
+        call auth_promote_cred_row
+    endif
     DEV_USER = ACTIVE_USER
     DEV_PASS = ACTIVE_PASS
     strlen ACTIVE_ENPASS
@@ -586,4 +596,125 @@ return
         filewriteln f_att ATT_LINE
         fileclose f_att
     endif
+return
+
+; 成功した認証行を credentials.csv の先頭(コメント/ヘッダ直後)へリアルタイム移動
+:auth_promote_cred_row
+    fileopen f_pr CRED_FILE 0 1
+    if f_pr = -1 then
+        return
+    endif
+    strdim PR_HDR  200
+    strdim PR_BODY 2000
+    PR_HDR_CNT  = 0
+    PR_BODY_CNT = 0
+    PR_SEEN_DATA = 0
+    PR_FOUND    = 0
+    PR_ABORT    = 0
+    PR_EOF      = 0
+
+    :pr_read_loop
+    if PR_EOF = 1 goto pr_read_done
+    pr_raw = ''
+    filereadln f_pr pr_raw
+    if result = 1 then
+        PR_EOF = 1
+        strlen pr_raw
+        if result = 0 goto pr_read_done
+    endif
+
+    pr_chk = pr_raw
+    strlen pr_chk
+    if result >= 3 then
+        strcopy pr_chk 1 3 PR_B3
+        strcompare PR_B3 #239#187#191
+        if result = 0 then
+            strlen pr_chk
+            PR_REM = result - 3
+            if PR_REM > 0 then
+                strcopy pr_chk 4 PR_REM pr_chk
+            else
+                pr_chk = ''
+            endif
+        endif
+    endif
+    strtrim pr_chk TRIM_WS
+
+    PR_IS_HDR = 0
+    strlen pr_chk
+    if result = 0 then
+        PR_IS_HDR = 1
+    else
+        strcopy pr_chk 1 1 PR_FC
+        strscan CMT_CHARS PR_FC
+        if result > 0 then
+            PR_IS_HDR = 1
+        else
+            strsplit pr_chk ',' 2
+            PR_U = groupmatchstr1
+            strtrim PR_U TRIM_FIELD
+            tolower PR_UL PR_U
+            sprintf2 PR_HK '|%s|' PR_UL
+            strscan HDR_CRED PR_HK
+            if result > 0 then
+                PR_IS_HDR = 1
+            endif
+        endif
+    endif
+
+    if PR_SEEN_DATA = 0 && PR_IS_HDR = 1 then
+        if PR_HDR_CNT >= 200 then
+            PR_ABORT = 1
+            goto pr_read_done
+        endif
+        PR_HDR[PR_HDR_CNT] = pr_chk
+        PR_HDR_CNT = PR_HDR_CNT + 1
+        goto pr_read_loop
+    endif
+
+    PR_SEEN_DATA = 1
+    if PR_FOUND = 0 then
+        strcompare pr_chk CRED_RAW_MATCH
+        if result = 0 then
+            PR_FOUND = 1
+            goto pr_read_loop
+        endif
+    endif
+
+    if PR_BODY_CNT >= 2000 then
+        PR_ABORT = 1
+        goto pr_read_done
+    endif
+    PR_BODY[PR_BODY_CNT] = pr_chk
+    PR_BODY_CNT = PR_BODY_CNT + 1
+    goto pr_read_loop
+
+    :pr_read_done
+    fileclose f_pr
+    if PR_ABORT = 1 || PR_FOUND = 0 then
+        return
+    endif
+
+    fileopen f_pw CRED_FILE 0
+    if f_pw = -1 then
+        return
+    endif
+    PR_I = 0
+    :pr_wr_hdr
+    if PR_I >= PR_HDR_CNT goto pr_wr_match
+    filewriteln f_pw PR_HDR[PR_I]
+    PR_I = PR_I + 1
+    goto pr_wr_hdr
+
+    :pr_wr_match
+    filewriteln f_pw CRED_RAW_MATCH
+    PR_I = 0
+    :pr_wr_body
+    if PR_I >= PR_BODY_CNT goto pr_wr_done
+    filewriteln f_pw PR_BODY[PR_I]
+    PR_I = PR_I + 1
+    goto pr_wr_body
+
+    :pr_wr_done
+    fileclose f_pw
 return

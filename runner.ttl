@@ -19,8 +19,10 @@ SSH_EXTRA_OPTS = '-o ConnectTimeout=5'
 DEF_CSV_NAME   = 'device.csv'
 DEF_CRED_NAME  = 'credentials.csv'
 DEF_LOG_NAME   = 'logs'
+DEF_DEV_LOG_SUBDIR = 'devices'      ; 機器個別ログを別ディレクトリに分ける (空欄なら LOG_DIR 直下)
 DEF_CMD_NAME   = 'commands_universal.txt'
 
+REORDER_CRED_CSV         = 1        ; 1: 成功したcredentials.csvの行をリアルタイムで先頭へ移動
 FALLBACK_TO_CRED_FILE    = 0        ; 1: device.csv固有PW失敗時にcredentials.csvも試行
 FALLBACK_TO_BASTION_CRED = 0        ; 0: 空欄時に踏み台ユーザーを自動流用しない(推奨)
 LOGIN_TIMEOUT       = 12            ; ログイン待機最大秒数
@@ -229,25 +231,26 @@ if result = 0 then
     OK_COUNT = OK_COUNT + 1
     fileopen f_res RESOLVED_FILE 1
     if f_res <> -1 then
-        sprintf2 RES_LINE '%s,%s,%s,%s,%s' DEV_NAME DEV_IP DEV_USER DEV_PROTO DEV_STATUS
+        sprintf2 RES_LINE '%s,%s,%s,%s,%s,%s' DEV_NAME DEV_IP DEV_USER DEV_PASS DEV_PROTO DEV_STATUS
         filewriteln f_res RES_LINE
         fileclose f_res
     endif
 else
     NG_COUNT = NG_COUNT + 1
     DEV_USER = '-'
+    DEV_PASS = '-'
 endif
 
 getdate TS '%Y/%m/%d %H:%M:%S'
 fileopen f_sum SUMMARY_FILE 1
 if f_sum <> -1 then
-    sprintf2 SUM_LINE '%s,%s,%s,%s,%s,%s,%s,%s' TS DEV_NAME DEV_IP DEV_PROTO PROMPT_SYMBOL DEV_STATUS DEV_DETAIL DEV_USER
+    sprintf2 SUM_LINE '%s,%s,%s,%s,%s,%s,%s,%s,%s' TS DEV_NAME DEV_IP DEV_PROTO PROMPT_SYMBOL DEV_STATUS DEV_DETAIL DEV_USER DEV_PASS
     filewriteln f_sum SUM_LINE
     fileclose f_sum
 endif
 fileopen f_att ATTEMPT_LOG_FILE 1
 if f_att <> -1 then
-    sprintf2 ATT_LINE '%s,%s,%s,#%d,%s,%s,-,%s (%s)' TS DEV_NAME DEV_IP AUTH_ATTEMPT DEV_PROTO DEV_USER DEV_STATUS DEV_DETAIL
+    sprintf2 ATT_LINE '%s,%s,%s,#%d,%s,%s,%s,%s (%s)' TS DEV_NAME DEV_IP AUTH_ATTEMPT DEV_PROTO DEV_USER DEV_PASS DEV_STATUS DEV_DETAIL
     filewriteln f_att ATT_LINE
     fileclose f_att
 endif

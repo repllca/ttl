@@ -134,7 +134,7 @@ mpause 300
 flushrecv
 
 ; --- 4. ログ取得 & コマンド順次実行 ---
-sprintf2 LOG_FILE '%s\%s_%s.log' LOG_DIR DEV_NAME RUN_TS
+sprintf2 LOG_FILE '%s\%s_%s.log' DEV_LOG_DIR DEV_NAME RUN_TS
 logclose
 logopen LOG_FILE 0 0
 IS_LOG_OPEN = 1

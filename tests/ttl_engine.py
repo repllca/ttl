@@ -114,6 +114,18 @@ class TTLEngine:
             raise RuntimeError(f"TTL execution exceeded maximum step limit ({self.max_steps}) - possible infinite loop")
 
     def _execute_line(self, line_num, code):
+        # 1a. Array Element Assignment: ARR[IDX] = EXPR
+        m_arr_assign = re.match(r"^([a-zA-Z_][a-zA-Z0-9_]*)\[([^\]]+)\]\s*=\s*(.*)$", code)
+        if m_arr_assign:
+            arr_name = m_arr_assign.group(1)
+            idx = int(self._eval_expr(m_arr_assign.group(2)))
+            val = self._eval_expr(m_arr_assign.group(3))
+            arr = self.vars.setdefault(arr_name, [])
+            if isinstance(arr, list) and 0 <= idx < len(arr):
+                arr[idx] = val
+            self.pc += 1
+            return
+
         # 1. Variable Assignment: VAR = EXPR
         m_assign = re.match(r"^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(.*)$", code)
         if m_assign and not code.lower().startswith(("if ", "wait ", "timeout ")):
@@ -126,6 +138,14 @@ class TTLEngine:
 
         parts = code.split()
         cmd = parts[0].lower()
+
+        # 1b. strdim <arr_name> <size> (Tera Term 4.67+ / 5.x string array)
+        if cmd == "strdim":
+            arr_name = parts[1]
+            size = int(self._eval_expr(parts[2]))
+            self.vars[arr_name] = [""] * size
+            self.pc += 1
+            return
 
         # 2. if <cond> <statement> or if <cond> then
         if cmd == "if":
@@ -806,6 +826,11 @@ class TTLEngine:
             return self._eval_token(expr_str)
         if (expr_str.startswith("'") and expr_str.endswith("'")) or (expr_str.startswith('"') and expr_str.endswith('"')):
             return expr_str[1:-1]
+        m_arr = re.match(r"^([a-zA-Z_][a-zA-Z0-9_]*)\[([^\]]+)\]$", expr_str)
+        if m_arr:
+            arr = self.vars.get(m_arr.group(1), [])
+            idx = int(self._eval_expr(m_arr.group(2)))
+            return arr[idx] if isinstance(arr, list) and 0 <= idx < len(arr) else ""
         if expr_str in self.vars:
             return self.vars[expr_str]
         # Basic arithmetic: a + b, a - b
@@ -830,6 +855,11 @@ class TTLEngine:
                 return "".join(chr(int(c)) for c in m_chars)
         if token in self.vars:
             return self.vars[token]
+        m_arr = re.match(r"^([a-zA-Z_][a-zA-Z0-9_]*)\[([^\]]+)\]$", token)
+        if m_arr:
+            arr = self.vars.get(m_arr.group(1), [])
+            idx = int(self._eval_expr(m_arr.group(2)))
+            return arr[idx] if isinstance(arr, list) and 0 <= idx < len(arr) else ""
         try:
             return int(token)
         except ValueError:
