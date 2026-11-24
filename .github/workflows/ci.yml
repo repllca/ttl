@@ -114,23 +114,37 @@ jobs:
             )
             Write-Host "Launching real ttpmacro.exe: $env:TTPMACRO_EXE $($macroArgs -join ' ')"
             $proc = Start-Process -FilePath $env:TTPMACRO_EXE -ArgumentList $macroArgs -PassThru
-            $finished = $proc.WaitForExit(90000)
-            if (-not $finished) {
+            $deadline = (Get-Date).AddSeconds(60)
+            $done = $false
+            while ((Get-Date) -lt $deadline) {
+              if ($proc.HasExited) {
+                $done = $true
+                break
+              }
+              $sumFile = Get-ChildItem -Path $logDir -Filter "summary_*.csv" -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($sumFile) {
+                $sumLines = (Get-Content $sumFile.FullName -ErrorAction SilentlyContinue | Where-Object { $_ -and -not $_.StartsWith("Timestamp") })
+                if ($sumLines.Count -ge 4) {
+                  Start-Sleep -Seconds 2
+                  $done = $true
+                  break
+                }
+              }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $proc.HasExited) {
               Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
               Get-Process ttermpro -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            }
+            if (-not $done) {
               Write-Host "=== CI SERVER STDOUT ==="
               if (Test-Path $srvOut) { Get-Content $srvOut }
               Write-Host "=== CI SERVER STDERR ==="
               if (Test-Path $srvErr) { Get-Content $srvErr }
-              Write-Host "=== CI LOGS FILES ==="
-              if (Test-Path $logDir) {
-                Get-ChildItem -Path $logDir -Recurse | ForEach-Object { Write-Host $_.FullName }
-                Get-ChildItem -Path $logDir -Filter "*.csv" | ForEach-Object { Write-Host "--- $($_.Name) ---"; Get-Content $_.FullName }
-              }
-              Write-Error "Real ttpmacro.exe timed out after 90s!"
+              Write-Error "Real ttpmacro.exe did not complete all 4 devices within 60s!"
               exit 1
             }
-            Write-Host "Real ttpmacro.exe exited cleanly with code: $($proc.ExitCode)"
+            Write-Host "Real Tera Term 5.4.1 completed all 4 devices cleanly!"
           }
           finally {
             Stop-Process -Id $srv.Id -Force -ErrorAction SilentlyContinue
