@@ -497,6 +497,20 @@ class TTLEngine:
             self.pc += 1
             return
 
+        # 21b. filedelete <filename>
+        if cmd == "filedelete":
+            fname = str(self._eval_expr(code[len(cmd):].strip()))
+            fname_clean = os.path.normpath(fname.replace("\\", os.sep).replace("/", os.sep))
+            filepath = os.path.join(self.workspace_dir, fname_clean) if not os.path.isabs(fname_clean) else fname_clean
+            try:
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                self.vars["result"] = 0
+            except Exception:
+                self.vars["result"] = -1
+            self.pc += 1
+            return
+
         # 22. logopen <fname> <bin> <append>
         if cmd == "logopen":
             fname = str(self._eval_token(parts[1]))

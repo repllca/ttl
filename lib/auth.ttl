@@ -613,18 +613,32 @@ return
     endif
 return
 
-; 成功した認証行を credentials.csv の先頭(コメント/ヘッダ直後)へリアルタイム移動
+; 成功した認証行を credentials.csv の先頭(コメント/ヘッダ直後)へリアルタイム移動 (配列不使用・一時ファイル方式)
 :auth_promote_cred_row
     fileopen f_pr CRED_FILE 0 1
     if f_pr = -1 then
         return
     endif
-    PR_HDR_CNT  = 0
-    PR_BODY_CNT = 0
+    sprintf2 PR_HDR_TMP  '%s.hdr.tmp'  CRED_FILE
+    sprintf2 PR_BODY_TMP '%s.body.tmp' CRED_FILE
+    fileopen f_ph PR_HDR_TMP  0
+    fileopen f_pb PR_BODY_TMP 0
+    if f_ph = -1 || f_pb = -1 then
+        fileclose f_pr
+        if f_ph <> -1 then
+            fileclose f_ph
+            filedelete PR_HDR_TMP
+        endif
+        if f_pb <> -1 then
+            fileclose f_pb
+            filedelete PR_BODY_TMP
+        endif
+        return
+    endif
+
     PR_SEEN_DATA = 0
-    PR_FOUND    = 0
-    PR_ABORT    = 0
-    PR_EOF      = 0
+    PR_FOUND     = 0
+    PR_EOF       = 0
 
     :pr_read_loop
     if PR_EOF = 1 goto pr_read_done
@@ -685,12 +699,7 @@ return
     endif
 
     if PR_SEEN_DATA = 0 && PR_IS_HDR = 1 then
-        if PR_HDR_CNT >= 200 then
-            PR_ABORT = 1
-            goto pr_read_done
-        endif
-        PR_HDR[PR_HDR_CNT] = pr_chk
-        PR_HDR_CNT = PR_HDR_CNT + 1
+        filewriteln f_ph pr_chk
         goto pr_read_loop
     endif
 
@@ -703,40 +712,61 @@ return
         endif
     endif
 
-    if PR_BODY_CNT >= 2000 then
-        PR_ABORT = 1
-        goto pr_read_done
-    endif
-    PR_BODY[PR_BODY_CNT] = pr_chk
-    PR_BODY_CNT = PR_BODY_CNT + 1
+    filewriteln f_pb pr_chk
     goto pr_read_loop
 
     :pr_read_done
     fileclose f_pr
-    if PR_ABORT = 1 || PR_FOUND = 0 then
-        return
+    fileclose f_ph
+    fileclose f_pb
+
+    if PR_FOUND = 1 then
+        fileopen f_pw CRED_FILE 0
+        if f_pw <> -1 then
+            ; 1) ヘッダ・コメント行
+            fileopen f_ph PR_HDR_TMP 0 1
+            if f_ph <> -1 then
+                PR_EOF = 0
+                :pr_cp_hdr
+                if PR_EOF = 1 goto pr_cp_hdr_done
+                pr_tmp = ''
+                filereadln f_ph pr_tmp
+                if result = 1 then
+                    PR_EOF = 1
+                    strlen pr_tmp
+                    if result = 0 goto pr_cp_hdr_done
+                endif
+                filewriteln f_pw pr_tmp
+                goto pr_cp_hdr
+                :pr_cp_hdr_done
+                fileclose f_ph
+            endif
+
+            ; 2) 成功した行をデータ先頭に配置
+            filewriteln f_pw CRED_RAW_MATCH
+
+            ; 3) 残りのデータ行
+            fileopen f_pb PR_BODY_TMP 0 1
+            if f_pb <> -1 then
+                PR_EOF = 0
+                :pr_cp_body
+                if PR_EOF = 1 goto pr_cp_body_done
+                pr_tmp = ''
+                filereadln f_pb pr_tmp
+                if result = 1 then
+                    PR_EOF = 1
+                    strlen pr_tmp
+                    if result = 0 goto pr_cp_body_done
+                endif
+                filewriteln f_pw pr_tmp
+                goto pr_cp_body
+                :pr_cp_body_done
+                fileclose f_pb
+            endif
+            fileclose f_pw
+        endif
     endif
 
-    fileopen f_pw CRED_FILE 0
-    if f_pw = -1 then
-        return
-    endif
-    PR_I = 0
-    :pr_wr_hdr
-    if PR_I >= PR_HDR_CNT goto pr_wr_match
-    filewriteln f_pw PR_HDR[PR_I]
-    PR_I = PR_I + 1
-    goto pr_wr_hdr
-
-    :pr_wr_match
-    filewriteln f_pw CRED_RAW_MATCH
-    PR_I = 0
-    :pr_wr_body
-    if PR_I >= PR_BODY_CNT goto pr_wr_done
-    filewriteln f_pw PR_BODY[PR_I]
-    PR_I = PR_I + 1
-    goto pr_wr_body
-
-    :pr_wr_done
-    fileclose f_pw
+    filedelete PR_HDR_TMP
+    filedelete PR_BODY_TMP
 return

@@ -27,7 +27,7 @@ MODULAR_FILES = [
 VALID_TTL_5X_COMMANDS = {
     "connect", "disconnect", "passwordbox", "messagebox", "inputbox", "yesnobox",
     "wait", "waitln", "waitrecv", "waitregex", "flushrecv", "sendln", "send",
-    "fileopen", "filereadln", "filewriteln", "fileclose",
+    "fileopen", "filereadln", "filewriteln", "fileclose", "filedelete",
     "strconcat", "strcopy", "strcompare", "strlen", "strscan", "sprintf", "sprintf2",
     "strsplit", "strtrim", "strdim", "tolower", "toupper", "strmatch", "getdate",
     "logopen", "logwrite", "logclose", "pause", "mpause", "timeout", "end", "exit", "goto",
