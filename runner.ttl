@@ -45,6 +45,10 @@ HDR_DEV    = '|ホスト名|ホスト|機器名|hostname|host|'
 HDR_CRED   = '|ユーザー名|ユーザ名|username|user|'
 HDR_PAT    = '|パターン名|パターン|pattern|name|'
 
+; 配列はスクリプト全体で1度だけ宣言 (再宣言エラー防止)
+strdim PR_HDR  200
+strdim PR_BODY 2000
+
 sprintf2 LIB_INIT  '%s\lib\init.ttl'          BASE_DIR
 sprintf2 LIB_AUTH  '%s\lib\auth.ttl'          BASE_DIR
 sprintf2 LIB_EXEC  '%s\lib\exec_device.ttl'   BASE_DIR

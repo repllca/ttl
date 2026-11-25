@@ -268,6 +268,49 @@ class TestModularTTLEndToEnd(unittest.TestCase):
             if os.path.exists(temp_dev):
                 os.remove(temp_dev)
 
+    def test_modular_multiple_cred_promotions_no_strdim_redeclare(self):
+        """
+        Regression test: calling auth_promote_cred_row multiple times in one run
+        must NOT re-execute strdim (which raises a dialog error in real Tera Term 5.4.1).
+        """
+        logs_dir = self._clean_logs()
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", dir=WORKSPACE_DIR, delete=False, encoding="utf-8") as tf_cred:
+            tf_cred.write(
+                "# Pattern,Username,Password,EnablePassword,Protocol\n"
+                "Wrong1,w1,WRONG_PASS,,\n"
+                "CiscoPat,admin,Pass1234,EnablePass123,ssh\n"
+                "TelnetPat,admin,Pass1234,EnablePass123,telnet\n"
+            )
+            temp_cred = tf_cred.name
+
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", dir=WORKSPACE_DIR, delete=False, encoding="utf-8") as tf_dev:
+            # Device 1 promotes CiscoPat (row 2 -> row 1)
+            # Device 2 (telnet-only) promotes TelnetPat (row 3 -> row 1)
+            tf_dev.write(
+                "PROMO-1,192.168.10.1,,,,ssh,commands_cisco.txt\n"
+                "PROMO-2,192.168.10.252,,,,telnet,commands_cisco.txt\n"
+            )
+            temp_dev = tf_dev.name
+
+        try:
+            session = MockSession()
+            engine = TTLEngine(
+                WORKSPACE_DIR,
+                session,
+                params=["runner.ttl", "logs", "mock_pass", temp_dev, temp_cred],
+            )
+            engine.load_script(MAIN_TTL)
+            engine.run(strict_402=False)
+
+            with open(temp_cred, "r", encoding="utf-8") as f:
+                clines = [l.strip() for l in f if l.strip()]
+            self.assertEqual(clines[1], "TelnetPat,admin,Pass1234,EnablePass123,telnet")
+            self.assertEqual(clines[2], "CiscoPat,admin,Pass1234,EnablePass123,ssh")
+        finally:
+            for p in (temp_cred, temp_dev):
+                if os.path.exists(p):
+                    os.remove(p)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -619,8 +619,6 @@ return
     if f_pr = -1 then
         return
     endif
-    strdim PR_HDR  200
-    strdim PR_BODY 2000
     PR_HDR_CNT  = 0
     PR_BODY_CNT = 0
     PR_SEEN_DATA = 0

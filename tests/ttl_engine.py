@@ -139,9 +139,11 @@ class TTLEngine:
         parts = code.split()
         cmd = parts[0].lower()
 
-        # 1b. strdim <arr_name> <size> (Tera Term 4.67+ / 5.x string array)
+        # 1b. strdim <arr_name> <size> (Tera Term 4.67+ / 5.x string array - cannot be re-declared!)
         if cmd == "strdim":
             arr_name = parts[1]
+            if arr_name in self.vars:
+                raise RuntimeError(f"Line {line_num}: Array variable '{arr_name}' already declared with strdim")
             size = int(self._eval_expr(parts[2]))
             self.vars[arr_name] = [""] * size
             self.pc += 1
