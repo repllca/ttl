@@ -19,9 +19,10 @@ if result > 0 then
 endif
 
 if HAS_DEV_CRED = 1 then
-    ACTIVE_USER   = DEV_USER
-    ACTIVE_PASS   = DEV_PASS
-    ACTIVE_ENPASS = DEV_ENPASS
+    ACTIVE_PATTERN = 'Direct(device.csv)'
+    ACTIVE_USER    = DEV_USER
+    ACTIVE_PASS    = DEV_PASS
+    ACTIVE_ENPASS  = DEV_ENPASS
     strlen ACTIVE_ENPASS
     if result = 0 then
         ACTIVE_ENPASS = ACTIVE_PASS
@@ -41,9 +42,10 @@ strlen CRED_FILE
 if result > 0 goto open_cred_csv_file
 
 if FALLBACK_TO_BASTION_CRED = 1 then
-    ACTIVE_USER   = BASTION_USER
-    ACTIVE_PASS   = BASTION_PASS
-    ACTIVE_ENPASS = BASTION_PASS
+    ACTIVE_PATTERN = 'Bastion'
+    ACTIVE_USER    = BASTION_USER
+    ACTIVE_PASS    = BASTION_PASS
+    ACTIVE_ENPASS  = BASTION_PASS
     AUTH_ATTEMPT  = 1
     if HAS_ORIG_PROTO = 0 then
         DEV_PROTO = 'ssh'
@@ -105,26 +107,37 @@ strcopy cred_line 1 1 fc_c
 strscan CMT_CHARS fc_c
 if result > 0 goto read_cred_csv_loop
 
-strsplit cred_line ',' 4
-C_USER   = groupmatchstr1
-C_PASS   = groupmatchstr2
-C_ENPASS = groupmatchstr3
-C_PROTO  = groupmatchstr4
-strtrim C_USER   TRIM_FIELD
-strtrim C_PASS   TRIM_FIELD
-strtrim C_ENPASS TRIM_FIELD
+strsplit cred_line ',' 5
+C_PATTERN = groupmatchstr1
+C_USER    = groupmatchstr2
+C_PASS    = groupmatchstr3
+C_ENPASS  = groupmatchstr4
+C_PROTO   = groupmatchstr5
+strtrim C_PATTERN TRIM_FIELD
+strtrim C_USER    TRIM_FIELD
+strtrim C_PASS    TRIM_FIELD
+strtrim C_ENPASS  TRIM_FIELD
 strsplit C_PROTO ',' 2
 C_PROTO = groupmatchstr1
 strsplit C_PROTO '#' 2
 C_PROTO = groupmatchstr1
 strsplit C_PROTO ';' 2
 C_PROTO = groupmatchstr1
-strtrim C_PROTO  TRIM_FIELD
+strtrim C_PROTO   TRIM_FIELD
 
+tolower H_CP C_PATTERN
+sprintf2 H_PCHK '|%s|' H_CP
+strscan HDR_PAT H_PCHK
+if result > 0 goto read_cred_csv_loop
 tolower H_CU C_USER
 sprintf2 H_CHK '|%s|' H_CU
 strscan HDR_CRED H_CHK
 if result > 0 goto read_cred_csv_loop
+
+strlen C_PATTERN
+if result = 0 then
+    C_PATTERN = '-'
+endif
 strlen C_USER
 CU_LEN = result
 strlen C_PASS
@@ -145,8 +158,8 @@ if HAS_ORIG_PROTO = 1 then
         if result <> 0 then
             ATT_NO    = '-'
             ATT_PROTO = C_PROTO
+            ATT_PAT   = C_PATTERN
             ATT_USER  = C_USER
-            ATT_PASS  = '-'
             sprintf2 ATT_RES 'SKIP_PROTO (CSV=%s Need=%s)' C_PROTO ORIG_DEV_PROTO
             call auth_log_attempt
             goto read_cred_csv_loop
@@ -187,13 +200,14 @@ if HAS_DEV_CRED = 1 && HAS_ORIG_PROTO = 1 && AUTH_ATTEMPT = 1 then
     endif
 endif
 
-AUTH_ATTEMPT  = AUTH_ATTEMPT + 1
-CRED_DATA_IDX = CRED_DATA_IDX + 1
+AUTH_ATTEMPT   = AUTH_ATTEMPT + 1
+CRED_DATA_IDX  = CRED_DATA_IDX + 1
 CRED_FROM_FILE = 1
 CRED_RAW_MATCH = cred_line
-ACTIVE_USER   = C_USER
-ACTIVE_PASS   = C_PASS
-ACTIVE_ENPASS = C_ENPASS
+ACTIVE_PATTERN = C_PATTERN
+ACTIVE_USER    = C_USER
+ACTIVE_PASS    = C_PASS
+ACTIVE_ENPASS  = C_ENPASS
 goto issue_connect_cmd
 
 :cred_csv_eof
@@ -233,15 +247,15 @@ SKIP_RETRY_WAIT = 0
 
 sprintf2 ATT_NO '#%d' AUTH_ATTEMPT
 ATT_PROTO = DEV_PROTO
+ATT_PAT   = ACTIVE_PATTERN
 ATT_USER  = ACTIVE_USER
-ATT_PASS  = ACTIVE_PASS
 ATT_RES   = 'TRYING'
 call auth_log_attempt
 
 if paramcnt < 3 then
-    sprintf2 T_STR '[#%d %s] %s (%s) %s' AUTH_ATTEMPT DEV_PROTO DEV_NAME DEV_IP ACTIVE_USER
+    sprintf2 T_STR '[#%d %s] %s (%s) %s' AUTH_ATTEMPT DEV_PROTO DEV_NAME DEV_IP ACTIVE_PATTERN
     settitle T_STR
-    sprintf2 DLG_MSG '機器: %s (%s)%sプロトコル: %s / 試行: #%d%sユーザー: %s%sパスワード: %s' DEV_NAME DEV_IP CRLF DEV_PROTO AUTH_ATTEMPT CRLF ACTIVE_USER CRLF ACTIVE_PASS
+    sprintf2 DLG_MSG '機器: %s (%s)%sプロトコル: %s / 試行: #%d%sパターン: %s%sユーザー: %s' DEV_NAME DEV_IP CRLF DEV_PROTO AUTH_ATTEMPT CRLF ACTIVE_PATTERN CRLF ACTIVE_USER
     statusbox DLG_MSG '接続・認証試行中'
 endif
 
@@ -317,8 +331,8 @@ elseif S1 = 7 || S1 = 8 then
         SKIP_RETRY_WAIT = 1
         sprintf2 ATT_NO '#%d' AUTH_ATTEMPT
         ATT_PROTO = DEV_PROTO
+        ATT_PAT   = ACTIVE_PATTERN
         ATT_USER  = ACTIVE_USER
-        ATT_PASS  = '-'
         ATT_RES   = 'RETRY_LEGACY_SSH (Algorithm Mismatch)'
         call auth_log_attempt
         goto issue_connect_cmd
@@ -479,8 +493,8 @@ goto check_next_credential
 :check_next_credential
 sprintf2 ATT_NO '#%d' AUTH_ATTEMPT
 ATT_PROTO = DEV_PROTO
+ATT_PAT   = ACTIVE_PATTERN
 ATT_USER  = ACTIVE_USER
-ATT_PASS  = '-'
 sprintf2 ATT_RES 'FAIL (%s)' LAST_FAIL_DETAIL
 call auth_log_attempt
 
@@ -535,8 +549,9 @@ exit
     if REORDER_CRED_CSV = 1 && CRED_FROM_FILE = 1 && CRED_DATA_IDX > 1 then
         call auth_promote_cred_row
     endif
-    DEV_USER = ACTIVE_USER
-    DEV_PASS = ACTIVE_PASS
+    DEV_PATTERN = ACTIVE_PATTERN
+    DEV_USER    = ACTIVE_USER
+    DEV_PASS    = ACTIVE_PASS
     strlen ACTIVE_ENPASS
     if result > 0 then
         DEV_ENPASS = ACTIVE_ENPASS
@@ -592,7 +607,7 @@ return
     getdate ATT_TS '%Y/%m/%d %H:%M:%S'
     fileopen f_att ATTEMPT_LOG_FILE 1
     if f_att <> -1 then
-        sprintf2 ATT_LINE '%s,%s,%s,%s,%s,%s,%s,%s' ATT_TS DEV_NAME DEV_IP ATT_NO ATT_PROTO ATT_USER ATT_PASS ATT_RES
+        sprintf2 ATT_LINE '%s,%s,%s,%s,%s,%s,%s,%s' ATT_TS DEV_NAME DEV_IP ATT_NO ATT_PROTO ATT_PAT ATT_USER ATT_RES
         filewriteln f_att ATT_LINE
         fileclose f_att
     endif
@@ -650,14 +665,23 @@ return
         if result > 0 then
             PR_IS_HDR = 1
         else
-            strsplit pr_chk ',' 2
-            PR_U = groupmatchstr1
+            strsplit pr_chk ',' 3
+            PR_P = groupmatchstr1
+            PR_U = groupmatchstr2
+            strtrim PR_P TRIM_FIELD
             strtrim PR_U TRIM_FIELD
+            tolower PR_PL PR_P
             tolower PR_UL PR_U
-            sprintf2 PR_HK '|%s|' PR_UL
-            strscan HDR_CRED PR_HK
+            sprintf2 PR_PK '|%s|' PR_PL
+            strscan HDR_PAT PR_PK
             if result > 0 then
                 PR_IS_HDR = 1
+            else
+                sprintf2 PR_HK '|%s|' PR_UL
+                strscan HDR_CRED PR_HK
+                if result > 0 then
+                    PR_IS_HDR = 1
+                endif
             endif
         endif
     endif

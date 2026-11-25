@@ -24,9 +24,9 @@
   - ベンダー別ページング無効化コマンドを順次送信し、途中の `--More--` / `続く` 等も自動でスペース送りします。
 - **充実したログ・診断出力**:
   - `logs/devices/<ホスト名>_YYYYMMDD_HHMMSS.log`: 機器ごとのコマンド実行生ログ（`DEF_DEV_LOG_SUBDIR = 'devices'` でサマリCSVとフォルダ分離）
-  - `logs/summary_YYYYMMDD_HHMMSS.csv`: 全機器の成否（`OK`/`NG`）・プロンプト・詳細・**ログインユーザー名・パスワード**一覧
-  - `logs/resolved_accounts_YYYYMMDD_HHMMSS.csv`: ログイン成功したアカウント（ユーザー名・パスワード）・プロトコルの一覧
-  - `logs/attempts_YYYYMMDD_HHMMSS.csv`: 各試行のユーザー・パスワード・プロトコル・`SKIP_PROTO` / `FAIL (原因)` 履歴
+  - `logs/summary_YYYYMMDD_HHMMSS.csv`: 全機器の成否（`OK`/`NG`）・プロンプト・詳細・ログインユーザー・**成功したパスワードパターン名**一覧
+  - `logs/resolved_accounts_YYYYMMDD_HHMMSS.csv`: ログイン成功した**パスワードパターン名**・ユーザー名・プロトコルの一覧
+  - `logs/attempts_YYYYMMDD_HHMMSS.csv`: 各試行の**パスワードパターン名**・ユーザー名・プロトコル・`SKIP_PROTO` / `FAIL (原因)` 履歴
 
 ---
 
@@ -68,14 +68,14 @@
 ## 設定ファイルの書き方（推奨パターン）
 
 ### 1. `credentials.csv`（共通パスワード一覧）
-先頭行には `#` を付け、**4列目（プロトコル）は空欄にしておくと SSH / Telnet 両方に自動マッチする**ため最も確実です。
+1列目に **パスワードパターン名** を記載し、先頭行には `#` を付けます。**5列目（プロトコル）は空欄にしておくと SSH / Telnet 両方に自動マッチする**ため最も確実です。
 
 ```csv
-# ユーザー名,パスワード,管理者パスワード,プロトコル
-admin,Pass1234,EnablePass123,
-cisco,cisco,cisco,
-user1,Pass1234,,
-operator,Pass1234,,telnet
+# パターン名,ユーザー名,パスワード,管理者パスワード,プロトコル
+Cisco標準,admin,Pass1234,EnablePass123,
+Cisco初期,cisco,cisco,cisco,
+Linux標準,user1,Pass1234,,
+運用Telnet専用,operator,Pass1234,,telnet
 ```
 
 ### 2. `device.csv`（機器リスト）

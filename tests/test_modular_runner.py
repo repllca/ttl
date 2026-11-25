@@ -131,11 +131,11 @@ class TestModularTTLEndToEnd(unittest.TestCase):
             tf_cred.write(
                 b"\xef\xbb\xbf"
                 + (
-                    "# Username,Password,EnablePassword,Protocol\n"
-                    "t_only1,bad1,,telnet\n"
-                    "t_only2,bad2,,telnet\n"
-                    "wrong_u,WRONG_PASS,,\n"
-                    "admin,Pass1234,EnablePass123,"
+                    "# Pattern,Username,Password,EnablePassword,Protocol\n"
+                    "Telnet1,t_only1,bad1,,telnet\n"
+                    "Telnet2,t_only2,bad2,,telnet\n"
+                    "WrongPat,wrong_u,WRONG_PASS,,\n"
+                    "CiscoStd,admin,Pass1234,EnablePass123,"
                 ).encode("utf-8")
             )
             temp_cred = tf_cred.name
@@ -194,16 +194,17 @@ class TestModularTTLEndToEnd(unittest.TestCase):
             self.assertEqual(res["MOD-SHORTHAND"][5], "OK")
             self.assertEqual(res["MOD-SHORTHAND"][3], "ssh")
             self.assertEqual(res["MOD-SHORTHAND"][7], "admin")
-            self.assertEqual(res["MOD-SHORTHAND"][8], "Pass1234")
+            self.assertEqual(res["MOD-SHORTHAND"][8], "CiscoStd")
+            self.assertEqual(res["MOD-YAMAHA-01"][8], "Direct(device.csv)")
             self.assertEqual(res["MOD-NO-TELNET"][7], "-")
             self.assertEqual(res["MOD-NO-TELNET"][8], "-")
 
-            # Verify resolved_accounts_*.csv also contains LoggedInUser & LoggedInPass
+            # Verify resolved_accounts_*.csv contains Pattern & LoggedInUser
             resolved_files = glob.glob(os.path.join(logs_dir, "resolved_accounts_*.csv"))
             self.assertGreater(len(resolved_files), 0)
             with open(resolved_files[-1], "r", encoding="utf-8") as f:
                 res_text = f.read()
-            self.assertIn("MOD-CISCO-01,192.168.10.1,admin,Pass1234,ssh,OK", res_text)
+            self.assertIn("MOD-CISCO-01,192.168.10.1,CiscoStd,admin,ssh,OK", res_text)
 
             # Verify device logs are separated into logs/devices/, NOT directly under logs/
             self.assertEqual(len(glob.glob(os.path.join(logs_dir, "*.log"))), 0)
@@ -215,11 +216,11 @@ class TestModularTTLEndToEnd(unittest.TestCase):
             self.assertIn("==================== [ show ip interface brief ] ====================", clog)
 
             # Verify real-time credentials.csv reordering:
-            # 'admin,Pass1234,EnablePass123,' was row 4 initially, and must now be the FIRST data row!
+            # 'CiscoStd,admin,Pass1234,EnablePass123,' was row 4 initially, and must now be the FIRST data row!
             with open(temp_cred, "r", encoding="utf-8") as f:
                 cred_lines = [l for l in f.read().splitlines() if l.strip()]
-            self.assertEqual(cred_lines[0], "# Username,Password,EnablePassword,Protocol")
-            self.assertEqual(cred_lines[1], "admin,Pass1234,EnablePass123,")
+            self.assertEqual(cred_lines[0], "# Pattern,Username,Password,EnablePassword,Protocol")
+            self.assertEqual(cred_lines[1], "CiscoStd,admin,Pass1234,EnablePass123,")
             self.assertEqual(len(cred_lines), 5)
 
             att_files = glob.glob(os.path.join(logs_dir, "attempts_*.csv"))
@@ -230,10 +231,11 @@ class TestModularTTLEndToEnd(unittest.TestCase):
             self.assertIn("SKIP_PROTO (CSV=telnet Need=ssh)", att_text)
             self.assertIn("RETRY_LEGACY_SSH", att_text)
             self.assertIn("FAIL (Auth", att_text)
-            # Because MOD-CISCO-01 promoted admin to row 1, MOD-JUNIPER-01 & MOD-SHORTHAND must succeed on #1!
+            self.assertIn(",WrongPat,wrong_u,TRYING", att_text)
+            # Because MOD-CISCO-01 promoted CiscoStd to row 1, MOD-JUNIPER-01 & MOD-SHORTHAND must succeed on #1!
             juniper_tries = [l for l in att_lines if ",MOD-JUNIPER-01," in l and ",TRYING" in l]
             self.assertEqual(len(juniper_tries), 1)
-            self.assertIn(",#1,ssh,admin,Pass1234,TRYING", juniper_tries[0])
+            self.assertIn(",#1,ssh,CiscoStd,admin,TRYING", juniper_tries[0])
             no_telnet_tries = [l for l in att_lines if ",MOD-NO-TELNET," in l and ",TRYING" in l]
             self.assertEqual(len(no_telnet_tries), 1)
         finally:

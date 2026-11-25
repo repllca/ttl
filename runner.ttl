@@ -43,6 +43,7 @@ VALID_ENDS = '#>$]'
 BAD_STARTS = '%!^'
 HDR_DEV    = '|ホスト名|ホスト|機器名|hostname|host|'
 HDR_CRED   = '|ユーザー名|ユーザ名|username|user|'
+HDR_PAT    = '|パターン名|パターン|pattern|name|'
 
 sprintf2 LIB_INIT  '%s\lib\init.ttl'          BASE_DIR
 sprintf2 LIB_AUTH  '%s\lib\auth.ttl'          BASE_DIR
@@ -208,6 +209,8 @@ TELNET_PORT_DEAD = 0
 SSH_LEGACY_MODE  = 0
 ENABLE_FAILED    = 0
 BASTION_LOST     = 0
+DEV_PATTERN      = '-'
+ACTIVE_PATTERN   = '-'
 ACTIVE_USER      = ''
 ACTIVE_PASS      = ''
 ACTIVE_ENPASS    = ''
@@ -232,26 +235,26 @@ if result = 0 then
     OK_COUNT = OK_COUNT + 1
     fileopen f_res RESOLVED_FILE 1
     if f_res <> -1 then
-        sprintf2 RES_LINE '%s,%s,%s,%s,%s,%s' DEV_NAME DEV_IP DEV_USER DEV_PASS DEV_PROTO DEV_STATUS
+        sprintf2 RES_LINE '%s,%s,%s,%s,%s,%s' DEV_NAME DEV_IP DEV_PATTERN DEV_USER DEV_PROTO DEV_STATUS
         filewriteln f_res RES_LINE
         fileclose f_res
     endif
 else
     NG_COUNT = NG_COUNT + 1
-    DEV_USER = '-'
-    DEV_PASS = '-'
+    DEV_USER    = '-'
+    DEV_PATTERN = '-'
 endif
 
 getdate TS '%Y/%m/%d %H:%M:%S'
 fileopen f_sum SUMMARY_FILE 1
 if f_sum <> -1 then
-    sprintf2 SUM_LINE '%s,%s,%s,%s,%s,%s,%s,%s,%s' TS DEV_NAME DEV_IP DEV_PROTO PROMPT_SYMBOL DEV_STATUS DEV_DETAIL DEV_USER DEV_PASS
+    sprintf2 SUM_LINE '%s,%s,%s,%s,%s,%s,%s,%s,%s' TS DEV_NAME DEV_IP DEV_PROTO PROMPT_SYMBOL DEV_STATUS DEV_DETAIL DEV_USER DEV_PATTERN
     filewriteln f_sum SUM_LINE
     fileclose f_sum
 endif
 fileopen f_att ATTEMPT_LOG_FILE 1
 if f_att <> -1 then
-    sprintf2 ATT_LINE '%s,%s,%s,#%d,%s,%s,%s,%s (%s)' TS DEV_NAME DEV_IP AUTH_ATTEMPT DEV_PROTO DEV_USER DEV_PASS DEV_STATUS DEV_DETAIL
+    sprintf2 ATT_LINE '%s,%s,%s,#%d,%s,%s,%s,%s (%s)' TS DEV_NAME DEV_IP AUTH_ATTEMPT DEV_PROTO DEV_PATTERN DEV_USER DEV_STATUS DEV_DETAIL
     filewriteln f_att ATT_LINE
     fileclose f_att
 endif

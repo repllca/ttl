@@ -121,13 +121,13 @@ sprintf2 RESOLVED_FILE    '%s\resolved_accounts_%s.csv' LOG_DIR RUN_TS
 sprintf2 ATTEMPT_LOG_FILE '%s\attempts_%s.csv'          LOG_DIR RUN_TS
 
 INIT_PATH = SUMMARY_FILE
-INIT_HDR  = 'Timestamp,Device,IP,Protocol,FinalPrompt,Status,Detail,LoggedInUser,LoggedInPass'
+INIT_HDR  = 'Timestamp,Device,IP,Protocol,FinalPrompt,Status,Detail,LoggedInUser,Pattern'
 call init_write_hdr
 INIT_PATH = RESOLVED_FILE
-INIT_HDR  = 'Device,IP,LoggedInUser,LoggedInPass,Protocol,Status'
+INIT_HDR  = 'Device,IP,Pattern,LoggedInUser,Protocol,Status'
 call init_write_hdr
 INIT_PATH = ATTEMPT_LOG_FILE
-INIT_HDR  = 'Timestamp,Device,IP,Attempt,Protocol,User,Password,Result'
+INIT_HDR  = 'Timestamp,Device,IP,Attempt,Protocol,Pattern,User,Result'
 call init_write_hdr
 
 ; 未接続時のみ踏み台へSSH接続

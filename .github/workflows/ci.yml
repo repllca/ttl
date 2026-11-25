@@ -80,9 +80,9 @@ jobs:
           $logDir  = Join-Path $ws "ci_logs"
 
           @(
-            "# Username,Password,EnablePassword,Protocol",
-            "wrong_u,WRONG_PASS,,",
-            "admin,Pass1234,EnablePass123,"
+            "# Pattern,Username,Password,EnablePassword,Protocol",
+            "WrongPat,wrong_u,WRONG_PASS,,",
+            "CiscoStd,admin,Pass1234,EnablePass123,"
           ) | Set-Content -Path $credCsv -Encoding UTF8
 
           @(
@@ -160,9 +160,9 @@ jobs:
               txt = f.read()
           print('=== REAL TERA TERM SUMMARY ===\n' + txt)
           rows = {l.split(',')[1]: l.split(',') for l in txt.splitlines() if l.strip() and not l.startswith('Timestamp')}
-          assert rows['CI-SSH-AUTO'][5] == 'OK' and rows['CI-SSH-AUTO'][7] == 'admin' and rows['CI-SSH-AUTO'][8] == 'Pass1234', rows
-          assert rows['CI-LEGACY-SSH'][5] == 'OK' and rows['CI-LEGACY-SSH'][3] == 'ssh', rows
-          assert rows['CI-TELNET-AUTO'][5] == 'OK' and rows['CI-TELNET-AUTO'][3] == 'telnet', rows
+          assert rows['CI-SSH-AUTO'][5] == 'OK' and rows['CI-SSH-AUTO'][7] == 'admin' and rows['CI-SSH-AUTO'][8] == 'CiscoStd', rows
+          assert rows['CI-LEGACY-SSH'][5] == 'OK' and rows['CI-LEGACY-SSH'][3] == 'ssh' and rows['CI-LEGACY-SSH'][8] == 'CiscoStd', rows
+          assert rows['CI-TELNET-AUTO'][5] == 'OK' and rows['CI-TELNET-AUTO'][3] == 'telnet' and rows['CI-TELNET-AUTO'][8] == 'CiscoStd', rows
           assert rows['CI-NO-TELNET'][5] == 'NG' and 'Telnet Not Accepted' in rows['CI-NO-TELNET'][6], rows
 
           dev_logs = glob.glob(os.path.join(log_dir, 'devices', 'CI-SSH-AUTO_*.log'))
@@ -172,7 +172,7 @@ jobs:
 
           with open(r'$credCsv', 'r', encoding='utf-8') as f:
               clines = [l.strip() for l in f if l.strip()]
-          assert clines[1] == 'admin,Pass1234,EnablePass123,', f'Expected promoted row first, got: {clines}'
+          assert clines[1] == 'CiscoStd,admin,Pass1234,EnablePass123,', f'Expected promoted row first, got: {clines}'
           print('ALL REAL TERA TERM 5.4.1 E2E ASSERTIONS PASSED!')
           "@
 

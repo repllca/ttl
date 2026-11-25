@@ -27,15 +27,28 @@ class TestEndToEndSimulation(unittest.TestCase):
         self.engine.verify_strict_402_compatibility()
 
     def test_full_run_with_mock_lab(self):
-        """Execute the entire macro against mock multi-vendor devices."""
-        # Clean logs directory before run
+        """Execute the entire legacy device_runner.ttl macro against mock multi-vendor devices."""
+        import tempfile
         logs_dir = os.path.join(WORKSPACE_DIR, "logs")
         if os.path.exists(logs_dir):
             import shutil
             shutil.rmtree(logs_dir)
 
-        # Run execution
-        self.engine.run()
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", dir=WORKSPACE_DIR, delete=False, encoding="utf-8") as tf_cred:
+            tf_cred.write("admin,Pass1234,EnablePass123,\ncisco,cisco,cisco,\n")
+            temp_cred = tf_cred.name
+
+        try:
+            engine = TTLEngine(
+                WORKSPACE_DIR,
+                MockSession(),
+                params=["device_runner.ttl", "logs", "mock_pass", DEVICE_CSV, temp_cred],
+            )
+            engine.load_script(TTL_FILE)
+            engine.run()
+        finally:
+            if os.path.exists(temp_cred):
+                os.remove(temp_cred)
 
         # Check logs directory
         logs_dir = os.path.join(WORKSPACE_DIR, "logs")
